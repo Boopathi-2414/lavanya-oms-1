@@ -35,11 +35,9 @@ export function isSupabaseConfigured() {
   return Boolean(
     SUPABASE_URL &&
     SUPABASE_KEY &&
-    SUPABASE_URL !== 'https://your-project-ref.supabase.co' &&
-    SUPABASE_KEY !== 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...'
+    SUPABASE_URL.includes('supabase.co')
   );
 }
-
 // ── isSupabaseHealthy ────────────────────────────────────────
 // Returns false after any failed Supabase call, so callers can
 // quickly decide to fall back to localStorage without retrying.
