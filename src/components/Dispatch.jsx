@@ -2,14 +2,42 @@ import { useState, useRef } from 'react';
 import { toast } from './Toast.jsx';
 import { COMPANIES } from '../db.js';
 
+// Today's date string for daily courier count reset
+function todayStr() {
+  return new Date().toISOString().slice(0, 10); // "YYYY-MM-DD"
+}
+
 export default function Dispatch({ db, setDb }) {
   const [scanValue, setScanValue] = useState('');
   const [result,    setResult]    = useState(null);
-  const [fCompany,  setFCompany]  = useState(''); // Feature 5: segregate dispatch view by company
+  const [fCompany,  setFCompany]  = useState('');
   const inputRef = useRef();
 
+  // ── Flexible AWB/Order matching ──────────────────────────────
+  // Normalises the scanned value before comparing so barcode-scanner
+  // quirks (extra spaces, mixed case, leading zeros) never cause a miss.
+  function normalise(s) {
+    return (s || '').trim().toUpperCase().replace(/\s+/g, '');
+  }
+
   function findOrder(q) {
-    return db.orders.find((o) => !o.deleted && (o.awb === q || o.orderId === q || o.invoice === q));
+    const nq = normalise(q);
+    // 1. Exact AWB match (case-insensitive, trimmed)
+    let o = db.orders.find((x) => !x.deleted && normalise(x.awb) === nq);
+    if (o) return o;
+    // 2. Order ID match
+    o = db.orders.find((x) => !x.deleted && normalise(x.orderId) === nq);
+    if (o) return o;
+    // 3. Invoice match
+    o = db.orders.find((x) => !x.deleted && normalise(x.invoice) === nq);
+    if (o) return o;
+    // 4. Partial AWB match — last 10 digits (for scanners that drop prefix)
+    if (nq.length >= 10) {
+      const tail = nq.slice(-10);
+      o = db.orders.find((x) => !x.deleted && x.awb && normalise(x.awb).endsWith(tail));
+      if (o) return o;
+    }
+    return null;
   }
 
   function processDispatch() {
@@ -40,6 +68,28 @@ export default function Dispatch({ db, setDb }) {
   const dispatched = db.orders.filter((o) => o.status === 'Dispatched' && !o.deleted)
     .filter((o) => !fCompany || (o.company || 'Unknown') === fCompany)
     .slice().reverse();
+
+  // ── Today's courier-wise dispatch count (resets each day) ─────
+  const today = todayStr();
+  const todayOrders = db.orders.filter(
+    (o) => o.status === 'Dispatched' && !o.deleted &&
+    o.dispatchedAt && o.dispatchedAt.startsWith(today)
+  );
+
+  // Build courier breakdown for today's dispatches
+  const todayCourierMap = {};
+  for (const o of todayOrders) {
+    const courier = o.courier || (
+      o.awb
+        ? /^SF\d{8,13}FPL$/i.test(o.awb) ? 'Shadowfax'
+        : /^SF\d+$/i.test(o.awb) ? 'Shadowfax'
+        : /^FMPP|^FMPC|^FM/i.test(o.awb) ? 'Ekart'
+        : /^\d{13,18}$/.test(o.awb) ? 'Delhivery'
+        : 'Other'
+        : 'Unknown'
+    );
+    todayCourierMap[courier] = (todayCourierMap[courier] || 0) + 1;
+  }
 
   // Feature 5: auto-dispatch segregation — counts always reflect exactly
   // the company filter selected above, never mixed across companies.
@@ -90,6 +140,25 @@ export default function Dispatch({ db, setDb }) {
         </div>
 
         {/* Feature 5: auto-dispatch segregation summary */}
+        {/* Today's courier-wise dispatch summary */}
+        <div className="info-banner" style={{ marginBottom: 8, background: '#f0fdf4', borderColor: '#86efac' }}>
+          <strong>📦 இன்றைய Courier Count ({today}):</strong>{' '}
+          {Object.keys(todayCourierMap).length === 0
+            ? <span style={{ color: 'var(--muted)' }}>இன்று எந்த dispatch-உம் இல்லை</span>
+            : Object.entries(todayCourierMap).map(([courier, count], i) => (
+              <span key={courier}>
+                {i > 0 && ' | '}
+                <strong>{courier}</strong>: {count} parcels
+              </span>
+            ))
+          }
+          {todayOrders.length > 0 && (
+            <span style={{ marginLeft: 12, color: 'var(--muted)' }}>
+              (மொத்தம்: {todayOrders.length})
+            </span>
+          )}
+        </div>
+
         <div className="info-banner" style={{ marginBottom: 12 }}>
           <strong>🏢 Dispatched by Company:</strong>{' '}
           {dispatchedCompanyCounts.map((c, i) => (
