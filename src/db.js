@@ -497,7 +497,8 @@ function extractAwbStrict(page) {
   // that window (the "Return Code" pincode+code pair is comma-split into
   // two shorter runs, so it never wins the length sort below).
   if (KNOWN_COURIERS_RE.test(page)) {
-    const windowM = page.match(/Return\s*Code([\s\S]{0,400}?)Product\s*Details/i);
+    // Primary: Return Code → Product Details window
+    const windowM = page.match(/Return\s*Code([\s\S]{0,600}?)Product\s*Details/i);
     if (windowM && windowM[1]) {
       const digitRuns = [...windowM[1].matchAll(/(?<![A-Za-z0-9])(\d{10,18})(?![A-Za-z0-9])/g)].map((m) => m[1]);
       if (digitRuns.length) {
@@ -505,6 +506,11 @@ function extractAwbStrict(page) {
         return digitRuns[0];
       }
     }
+    // Fallback: barcode printed as a standalone large number directly under
+    // the Return Code line (Delhivery Meesho labels) — the 13-16 digit
+    // number that immediately follows the "641007,xxxxx" return code pair.
+    const delhiveryM = page.match(/\b\d{6},\d{7}\b[\s\S]{0,80}?(?<![A-Za-z0-9])(\d{13,16})(?![A-Za-z0-9])/);
+    if (delhiveryM) return delhiveryM[1];
   }
   return '';
 }
