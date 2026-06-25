@@ -480,6 +480,30 @@ function extractAwbStrict(page) {
     const m = page.match(sig.re);
     if (m) return m[0].toUpperCase();
   }
+  // ── Tier 2b — Amazon bare AWB (no "No." keyword, just "AWB <12digits>") ──
+  // Amazon ATSPL labels print: "AWB 370375642243" on a standalone line.
+  const amazonAwbM = page.match(/\bAWB\s+(\d{10,15})\b/i);
+  if (amazonAwbM) return amazonAwbM[1];
+
+  // ── Tier 2c — Meesho Shadowfax (SF...FPL pattern) ───────────────────────
+  // Meesho Shadowfax labels print AWB like: SF3574578302FPL in Return Code block
+  const shadowfaxMeeshoM = page.match(/\b(SF\d{7,13}FPL)\b/i);
+  if (shadowfaxMeeshoM) return shadowfaxMeeshoM[1].toUpperCase();
+
+  // ── Tier 2d — Meesho Delhivery (16-digit 1490836... number) ────────────
+  // Meesho Delhivery labels print 16-digit number below return code block
+  const delhivery16M = page.match(/\b(1490836\d{9})\b/);
+  if (delhivery16M) return delhivery16M[1];
+
+  // ── Tier 2e — Flipkart/Ekart FMPP/FMPC any format ──────────────────────
+  // Accept FMPP, FMPC, FMPC style AWBs directly from page text
+  const flipkartAwbM = page.match(/\b((?:FMPP|FMPC|FM[A-Z])\d{8,15})\b/i);
+  if (flipkartAwbM) return flipkartAwbM[1].toUpperCase();
+
+  // ── Tier 2f — Meesho Tracking ID fallback ───────────────────────────────
+  const meeshoTrackM = page.match(/(?:Tracking\s*(?:ID|No\.?|Number)\s*[:#]?\s*)(\d{10,18})/i);
+  if (meeshoTrackM) return meeshoTrackM[1];
+
   // ── Tier 3 — bare-barcode couriers (Delhivery, Ekart, …) ────────────
   // These print the numeric waybill as its own value directly under the
   // "Return Code" block, with NO "AWB:"/"Tracking:" keyword anywhere on
