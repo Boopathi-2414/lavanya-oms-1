@@ -3,7 +3,7 @@ import { loadDB, saveDB } from './db.js';
 import * as XLSX from 'xlsx';
 import { today } from './db.js';
 import { isSupabaseConfigured } from './supabase.js';
-import { fetchFreshDB, syncDBToSupabase, snapshotIds, mergeMissingLocalIntoFresh, subscribeToChanges, migrateHistoricalData } from './supabaseData.js';
+import { fetchFreshDB, syncDBToSupabase, snapshotIds, mergeMissingLocalIntoFresh, subscribeToChanges, migrateHistoricalData, flushPendingQueue } from './supabaseData.js';
 
 import ToastContainer, { toast } from './components/Toast.jsx';
 import LoginPage      from './components/LoginPage.jsx';
@@ -83,6 +83,7 @@ export default function App() {
   useEffect(() => {
     if (!user) return;
     if (isSupabaseConfigured()) {
+      flushPendingQueue(); // retry any unsaved changes from previous sessions
       refreshFromSupabase({ silent: true }).finally(() => setInitialLoading(false));
     } else {
       setInitialLoading(false);
