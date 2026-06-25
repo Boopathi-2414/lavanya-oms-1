@@ -61,30 +61,15 @@ export default function App() {
     setSyncState('syncing');
     try {
       const fresh = await fetchFreshDB();
-      const local = loadDB();
-      // Never let a refresh silently throw away records that only exist on
-      // THIS device (offline edits not synced yet, or the first time this
-      // device connects to a Supabase project that already has other
-      // devices' data, or vice versa).
-      const { merged, rescued } = mergeMissingLocalIntoFresh(fresh, local);
-      const rescuedCount = Object.values(rescued).reduce((a, b) => a + b, 0);
-
-      if (rescuedCount > 0) {
-        const result = await syncDBToSupabase(merged, snapshotIds(fresh));
-        snapshotRef.current = result.snapshot;
-        setDbRaw(merged);
-        saveDB(merged);
-        setSyncState(result.ok ? 'synced' : 'error');
-        setLastSynced(new Date());
-        toast(`Found ${rescuedCount} record(s) saved only on this device — uploaded them to Supabase instead of overwriting them.`, 'success');
-      } else {
-        setDbRaw(fresh);
-        saveDB(fresh); // keep the local cache in step, for instant load + offline fallback only
-        snapshotRef.current = snapshotIds(fresh);
-        setSyncState('synced');
-        setLastSynced(new Date());
-        if (!silent) toast('Dashboard refreshed with the latest data from Supabase', 'success');
-      }
+      // Supabase is the single source of truth.
+      // Always use Supabase data directly — do NOT merge localStorage.
+      // This ensures all devices show identical data.
+      setDbRaw(fresh);
+      saveDB(fresh);
+      snapshotRef.current = snapshotIds(fresh);
+      setSyncState('synced');
+      setLastSynced(new Date());
+      if (!silent) toast('Dashboard refreshed with the latest data from Supabase', 'success');
     } catch (e) {
       console.error('Supabase refresh failed:', e);
       setSyncState('error');
