@@ -21,7 +21,12 @@ export function loadDB() {
 }
 
 export function saveDB(db) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+  // 1) LocalStorage — offline fallback மட்டும்
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(db)); } catch (_) {}
+  // 2) Supabase-க்கு நேரடியாக sync
+  if (typeof window !== 'undefined' && window.__supabaseSyncFn) {
+    window.__supabaseSyncFn(db);
+  }
 }
 
 export function genId() {
@@ -985,10 +990,31 @@ function parseAmazon(text) {
     let awb = '';
     const prevPage = pages[i - 1] || '';
     const nextPage = pages[i + 1] || '';
+
+    // Tier 1: Try extractAwbStrict on surrounding pages
     for (const pg of [page, prevPage, nextPage]) {
       awb = extractAwbStrict(pg);
       if (awb) break;
     }
+
+    // Tier 2: Amazon label prints "AWB 370375XXXXXX" as text below barcode
+    // This is the most reliable source — try all surrounding pages
+    if (!awb) {
+      for (const pg of [page, prevPage, nextPage]) {
+        const m = pg.match(/\bAWB\s+(\d{10,15})\b/i);
+        if (m) { awb = m[1]; break; }
+      }
+    }
+
+    // Tier 3: "Order Id: 403-6054110-4072306" on label → use as AWB key
+    if (!awb) {
+      for (const pg of [page, prevPage, nextPage]) {
+        const m = pg.match(/Order\s*Id\s*[:\s]+([\d\-]{15,25})/i);
+        if (m) { awb = m[1].replace(/[^\d]/g, ''); break; }
+      }
+    }
+
+    // Tier 4: Use invoice number as last resort
     if (!awb && invoice) awb = invoice;
 
     // ── Customer name + address ───────────────────────────────────
