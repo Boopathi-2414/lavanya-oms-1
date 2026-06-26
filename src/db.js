@@ -442,6 +442,17 @@ function findMeeshoOrderId(page) {
 //     bare-barcode couriers (Delhivery, Ekart, …) are known to print it.
 function extractAwbStrict(page) {
   if (!page) return '';
+  // ── Tier 0 — Amazon ATSPL: "AWB <12-15 digits>" on its own line ────────
+  // Must run FIRST — Amazon label+invoice PDFs contain "AWB / Ref" as a
+  // table header on the invoice page which Tier 1 keyword regex can
+  // accidentally latch onto, returning the adjacent invoice number
+  // (2228274565) instead of the real shipping AWB (370396997940).
+  // By checking for the standalone "AWB <digits>" pattern first and
+  // requiring it NOT to be followed by "/" (which would indicate a
+  // column header like "AWB / Ref"), we always get the correct value.
+  const amazonAwbFirstM = page.match(/\bAWB\s+(\d{10,15})\b(?!\s*\/)/i);
+  if (amazonAwbFirstM) return amazonAwbFirstM[1];
+
   // Universal keyword-anchored AWB — any courier, any alphanumeric shape,
   // any prefix (FMPP, FMPC, FM, SF, …) — the keyword is what anchors
   // this, never the value's shape, so a brand-new prefix never needs a
@@ -485,10 +496,7 @@ function extractAwbStrict(page) {
     const m = page.match(sig.re);
     if (m) return m[0].toUpperCase();
   }
-  // ── Tier 2b — Amazon bare AWB (no "No." keyword, just "AWB <12digits>") ──
-  // Amazon ATSPL labels print: "AWB 370375642243" on a standalone line.
-  const amazonAwbM = page.match(/\bAWB\s+(\d{10,15})\b/i);
-  if (amazonAwbM) return amazonAwbM[1];
+  // ── Tier 2b — (Amazon AWB now handled in Tier 0 above) ─────────────────
 
   // ── Tier 2c — Meesho Shadowfax (SF...FPL pattern) ───────────────────────
   // Meesho Shadowfax labels print AWB like: SF3574578302FPL in Return Code block
