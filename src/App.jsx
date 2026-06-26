@@ -51,7 +51,9 @@ export default function App() {
   // Diff baseline for pushing only changed rows to Supabase — captured
   // separately from `db` itself (see supabaseData.js for why: every screen
   // mutates db.orders/db.trash/etc. in place before calling setDb).
-  const snapshotRef = useRef(snapshotIds(db));
+  // Start with empty snapshot — will be populated after Supabase fetch
+  // This ensures all orders are diffed correctly on first sync
+  const snapshotRef = useRef({});
 
   // Fetches the real, shared data straight from Supabase — used both on
   // page load and from the Dashboard's "Refresh Data" button, so the
@@ -82,8 +84,14 @@ export default function App() {
   // brief loading screen below rather than flashing stale numbers first.
   useEffect(() => {
     if (!user) return;
+    // Register global sync — saveDB() இதை call பண்ணும், data உடனே Supabase-க்கு போகும்
+    window.__supabaseSyncFn = (nextDb) => {
+      syncDBToSupabase(nextDb, snapshotRef.current).then((result) => {
+        if (result.snapshot) snapshotRef.current = result.snapshot;
+      });
+    };
     if (isSupabaseConfigured()) {
-      flushPendingQueue(); // retry any unsaved changes from previous sessions
+      flushPendingQueue();
       refreshFromSupabase({ silent: true }).finally(() => setInitialLoading(false));
     } else {
       setInitialLoading(false);
@@ -126,12 +134,14 @@ export default function App() {
 
   const setDb = useCallback((next) => {
     setDbRaw(next);
-    saveDB(next); // instant local cache, also doubles as the offline fallback
+    // Save to localStorage as offline fallback
+    try { localStorage.setItem('lavanya_oms_v3', JSON.stringify(next)); } catch(_) {}
+    // Always sync to Supabase immediately
     if (isSupabaseConfigured()) {
       syncDBToSupabase(next, snapshotRef.current).then((result) => {
-        snapshotRef.current = result.snapshot;
+        if (result.snapshot) snapshotRef.current = result.snapshot;
         if (!result.ok) {
-          toast('Some changes couldn\u2019t reach Supabase just now (saved locally) — they\u2019ll sync automatically on the next save.', 'info');
+          toast('சில changes Supabase-க்கு போகலை — அடுத்த save-ல் auto sync ஆகும்.', 'info');
         }
       });
     }
