@@ -79,14 +79,30 @@ export async function fetchFreshDB() {
   const client = await getClient();
   if (!client) throw new Error('not_configured');
 
+  // Supabase free plan default limit = 1000 rows per query.
+  // We use pagination (range) to fetch ALL rows — no cap.
+  async function fetchAllRows(table) {
+    const PAGE_SIZE = 1000;
+    let allRows = [];
+    let from = 0;
+    while (true) {
+      const { data, error } = await client
+        .from(table)
+        .select('id, data')
+        .order('updated_at', { ascending: false })
+        .range(from, from + PAGE_SIZE - 1);
+      if (error) throw error;
+      allRows = allRows.concat(data || []);
+      if (!data || data.length < PAGE_SIZE) break; // last page
+      from += PAGE_SIZE;
+    }
+    return allRows;
+  }
+
   const results = await Promise.all(
     Object.keys(TABLES).map(async (key) => {
-      const { data, error } = await client
-        .from(TABLES[key])
-        .select('id, data')
-        .order('updated_at', { ascending: false });
-      if (error) throw error;
-      return [key, rowsToArray(data)];
+      const rows = await fetchAllRows(TABLES[key]);
+      return [key, rowsToArray(rows)];
     })
   );
 
