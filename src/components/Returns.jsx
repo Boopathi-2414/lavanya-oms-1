@@ -8,13 +8,15 @@ export default function Returns({ db, setDb }) {
   // Per-row pending type before "Mark Received" — keyed by order id
   const [pendingType, setPendingType] = useState({});
   // ── Filter state ─────────────────────────────────────────────
-  const [filterType,    setFilterType]    = useState('');   // '' | 'Customer Return' | 'RTO' | 'unknown'
-  const [filterChannel, setFilterChannel] = useState('');   // '' | 'Amazon' | 'Flipkart' | 'Meesho'
-  const [filterSearch,  setFilterSearch]  = useState('');   // free-text search
+  const [filterType,    setFilterType]    = useState('');
+  const [filterChannel, setFilterChannel] = useState('');
+  const [filterSearch,  setFilterSearch]  = useState('');
+  // Confirm delete
+  const [deleteConfirm, setDeleteConfirm] = useState(null); // order id to confirm
 
   const fileInputRef = useRef();
 
-  // ── Excel import ────────────────────────────────────────────
+  // ── Excel import ── Sales-entry orders ONLY ─────────────────
   function importReturnExcel(file) {
     if (!file) return;
     const reader = new FileReader();
@@ -22,6 +24,51 @@ export default function Returns({ db, setDb }) {
       try {
         const wb   = XLSX.read(e.target.result, { type: 'array' });
         const data = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: '' });
+        let updated = 0;
+        let skipped = 0;
+        data.forEach((row) => {
+          const oid = String(row['Order ID'] || row['order_id'] || row['OrderID'] || '').trim();
+          const awb = String(row['AWB'] || row['Tracking'] || row['AWB Number'] || '').trim();
+          const rawType = String(row['Return Type'] || row['ReturnType'] || row['Type'] || '').trim();
+
+          // ✅ KEY FIX: Only match orders that exist in Sales (db.orders)
+          // Orders not in our sales entry are skipped — no phantom returns
+          const order = db.orders.find(
+            (o) => !o.deleted && ((oid && o.orderId === oid) || (awb && (o.awb === awb || o.invoice === awb)))
+          );
+          if (!order) {
+            skipped++;
+            return; // not our sales entry — skip silently
+          }
+          order.status      = 'In Transit (Return)';
+          order.transitDate = new Date().toISOString();
+          const normalised = normalizeReturnType(rawType);
+          if (normalised) order.return_type = normalised;
+          updated++;
+        });
+        setDb({ ...db });
+        const skipMsg = skipped > 0 ? ` (${skipped} skipped — not in sales)` : '';
+        setImportStatus(`✅ Updated ${updated} orders to "In Transit (Return)"${skipMsg}`);
+        toast(`${updated} orders marked In Transit${skipped ? `, ${skipped} skipped` : ''}`, 'success');
+      } catch (err) { toast('Error: ' + err.message, 'error'); }
+    };
+    reader.readAsArrayBuffer(file);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  }
+
+  // ── Delete a return (revert to Dispatched or Ready to Ship) ─
+  function deleteReturn(id) {
+    const o = db.orders.find((x) => x.id === id);
+    if (!o) return;
+    // Revert status: if it was dispatched before return, go back to Dispatched
+    o.status      = o.dispatchedAt ? 'Dispatched' : 'Ready to Ship';
+    o.return_type = '';
+    delete o.transitDate;
+    delete o.receivedDate;
+    setDb({ ...db });
+    setDeleteConfirm(null);
+    toast('Return entry deleted — order reverted', 'info');
+  }
         let updated = 0;
         data.forEach((row) => {
           const oid = String(row['Order ID'] || row['order_id'] || row['OrderID'] || '').trim();
@@ -381,13 +428,41 @@ export default function Returns({ db, setDb }) {
 
                     {activeTab === 'transit' && (
                       <td>
-                        <button
-                          className="btn btn-ghost btn-xs"
-                          onClick={() => markReceived(o.id)}
-                          title={o.return_type ? `Mark Received as ${o.return_type}` : 'Set Return Type first (optional)'}
-                        >
-                          ✅ Mark Received
-                        </button>
+                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                          <button
+                            className="btn btn-ghost btn-xs"
+                            onClick={() => markReceived(o.id)}
+                            title={o.return_type ? `Mark Received as ${o.return_type}` : 'Set Return Type first (optional)'}
+                          >
+                            ✅ Mark Received
+                          </button>
+                          {deleteConfirm === o.id ? (
+                            <>
+                              <button
+                                className="btn btn-xs"
+                                style={{ background: '#fef2f2', color: '#dc2626', border: '1px solid #fca5a5' }}
+                                onClick={() => deleteReturn(o.id)}
+                              >
+                                ⚠ Confirm Delete
+                              </button>
+                              <button
+                                className="btn btn-ghost btn-xs"
+                                onClick={() => setDeleteConfirm(null)}
+                              >
+                                Cancel
+                              </button>
+                            </>
+                          ) : (
+                            <button
+                              className="btn btn-ghost btn-xs"
+                              style={{ color: '#dc2626' }}
+                              onClick={() => setDeleteConfirm(o.id)}
+                              title="Delete this return entry (reverts order status)"
+                            >
+                              🗑 Delete
+                            </button>
+                          )}
+                        </div>
                       </td>
                     )}
                   </tr>
