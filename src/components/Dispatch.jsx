@@ -21,15 +21,18 @@ export default function Dispatch({ db, setDb }) {
   }
 
   function findOrder(q) {
-    const nq = normalise(q);
-    // 1. Exact AWB match (case-insensitive, trimmed)
-    let o = db.orders.find((x) => !x.deleted && normalise(x.awb) === nq);
+    // Strip "AWB#" or "AWB " prefix that Amazon DELHIVERY labels emit when scanned
+    const stripped = q.replace(/^AWB#?\s*/i, '').trim();
+    const nq = normalise(stripped);
+    const nqOrig = normalise(q);
+    // 1. Exact AWB match — try stripped first, then original
+    let o = db.orders.find((x) => !x.deleted && (normalise(x.awb) === nq || normalise(x.awb) === nqOrig));
     if (o) return o;
     // 2. Order ID match
-    o = db.orders.find((x) => !x.deleted && normalise(x.orderId) === nq);
+    o = db.orders.find((x) => !x.deleted && (normalise(x.orderId) === nq || normalise(x.orderId) === nqOrig));
     if (o) return o;
     // 3. Invoice match
-    o = db.orders.find((x) => !x.deleted && normalise(x.invoice) === nq);
+    o = db.orders.find((x) => !x.deleted && (normalise(x.invoice) === nq || normalise(x.invoice) === nqOrig));
     if (o) return o;
     // 4. Partial AWB match — last 10 digits (for scanners that drop prefix)
     if (nq.length >= 10) {
@@ -53,8 +56,10 @@ export default function Dispatch({ db, setDb }) {
       return;
     }
     // If scanning a real AWB for an Amazon order that has only an invoice ref
-    if (order.channel === 'Amazon' && order.awb && order.awb.startsWith('IN-') && /^\d{10,16}$/.test(q)) {
-      order.awb = q;
+    // Supports: plain digits (ATSPL SUR labels) and AWB# prefix (ATSPL_DELHIVERY labels)
+    const cleanQ = q.replace(/^AWB#?\s*/i, '').trim();
+    if (order.channel === 'Amazon' && order.awb && order.awb.startsWith('IN-') && /^\d{10,16}$/.test(cleanQ)) {
+      order.awb = cleanQ;
     }
     order.status = 'Dispatched';
     order.dispatchedAt = new Date().toISOString();
