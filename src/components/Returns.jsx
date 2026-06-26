@@ -25,9 +25,19 @@ export default function Returns({ db, setDb }) {
         const data = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: '' });
         let updated = 0;
         let skipped = 0;
+        // Helper: convert Excel scientific notation (1.49083E+15) to full number string
+        function fixAwb(val) {
+          const s = String(val || '').trim();
+          // If scientific notation like 1.49083E+15 — convert to integer string
+          if (/^\d+\.?\d*[Ee][+\-]?\d+$/.test(s)) {
+            return BigInt(Math.round(Number(s))).toString();
+          }
+          return s;
+        }
+
         data.forEach((row) => {
           const oid = String(row['Order ID'] || row['order_id'] || row['OrderID'] || '').trim();
-          const awb = String(row['AWB'] || row['Tracking'] || row['AWB Number'] || '').trim();
+          const awb = fixAwb(row['AWB'] || row['Tracking'] || row['AWB Number'] || '');
           // Accept "Return Type", "ReturnType", "Type" columns
           const rawType = String(row['Return Type'] || row['ReturnType'] || row['Type'] || '').trim();
 
