@@ -757,23 +757,51 @@ export async function extractPdfText(file, getOcrWorker) {
   });
 }
 
-// ── OCR WORKER (Tesseract.js) ──────────────────────────────────
-// Created lazily by the caller (Sales.jsx) on first use within an upload
-// batch, reused for every page that needs OCR in that batch, and
-// terminated once the batch finishes. Kept here so db.js owns all
-// PDF/OCR concerns and Sales.jsx stays UI/orchestration-only.
+// ── OCR via Claude Vision API (replaces Tesseract.js) ──────────────────────
+// For image-only PDF pages (zero text layer), render to canvas and send
+// to Claude's vision endpoint. Claude reads the AWB number far more
+// accurately than Tesseract on dense two-column shipping labels.
+// Falls back gracefully if the API call fails.
 export async function createOcrWorker() {
-  const { createWorker } = await import('tesseract.js');
-  const worker = await createWorker('eng');
-  // Tesseract's default page-segmentation mode (PSM 3, "fully automatic")
-  // tries to auto-detect columns/paragraphs. On dense two-column shipping
-  // labels it can reorder text unpredictably — e.g. the "AWB:" keyword and
-  // its number end up several lines apart in the OCR output, which breaks
-  // every keyword-anchored regex downstream and is a major source of the
-  // "captures wrong text" symptom. PSM 6 ("assume a single uniform block
-  // of text") keeps reading order far more stable for this kind of label.
-  try { await worker.setParameters({ tessedit_pageseg_mode: '6' }); } catch (_) { /* older tesseract.js builds may not expose this — non-fatal */ }
-  return worker;
+  // Returns a mock "worker" with a recognize() method compatible with
+  // the existing OCR call site (worker.recognize(canvas))
+  return {
+    recognize: async (canvas) => {
+      try {
+        const dataUrl  = canvas.toDataURL('image/jpeg', 0.9);
+        const base64   = dataUrl.split(',')[1];
+        const response = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: 'claude-sonnet-4-6',
+            max_tokens: 256,
+            messages: [{
+              role: 'user',
+              content: [
+                {
+                  type: 'image',
+                  source: { type: 'base64', media_type: 'image/jpeg', data: base64 },
+                },
+                {
+                  type: 'text',
+                  text: 'This is a shipping label. Extract ONLY the AWB / tracking number printed on the label. It usually appears below a barcode labeled "AWB" or "AWB#" or "Tracking No". Return ONLY the AWB number (digits or alphanumeric), nothing else. If not found, return empty string.',
+                },
+              ],
+            }],
+          }),
+        });
+        if (!response.ok) throw new Error(`Claude API ${response.status}`);
+        const json = await response.json();
+        const text = (json.content || []).map((b) => b.text || '').join('').trim();
+        return { data: { text } };
+      } catch (err) {
+        console.error('Claude Vision OCR failed:', err);
+        return { data: { text: '' } };
+      }
+    },
+    terminate: async () => { /* no-op */ },
+  };
 }
 
 // ── Returns { orders, parseLog } ─────────────────────────────
