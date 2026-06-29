@@ -503,9 +503,11 @@ function extractAwbStrict(page) {
   const shadowfaxMeeshoM = page.match(/\b(SF\d{7,13}FPL)\b/i);
   if (shadowfaxMeeshoM) return shadowfaxMeeshoM[1].toUpperCase();
 
-  // ── Tier 2d — Meesho Delhivery (16-digit 1490836... number) ────────────
-  // Meesho Delhivery labels print 16-digit number below return code block
-  const delhivery16M = page.match(/\b(1490836\d{9})\b/);
+  // ── Tier 2d — Meesho Delhivery (16-digit 1490xxx... number) ────────────
+  // Meesho Delhivery labels print 16-digit number below return code block.
+  // Prefix is NOT fixed to 1490836 — production labels show 1490836, 1490837,
+  // 1490838, etc. Match any 1490 + 3 digits + 9 digits = 16 digits total.
+  const delhivery16M = page.match(/\b(1490\d{3}\d{9})\b/);
   if (delhivery16M) return delhivery16M[1];
 
   // ── Tier 2e — Flipkart/Ekart FMPP/FMPC any format ──────────────────────
