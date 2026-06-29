@@ -2,40 +2,25 @@ import { useState, useRef, useCallback } from 'react';
 import { toast } from './Toast.jsx';
 import { COMPANIES } from '../db.js';
 
-// ── Sound feedback using Web Audio API (no external files needed) ──────────
+// ── Sound feedback using Web Audio API — ERROR only ───────────────────────
+// Plays a distinctive buzz only when a scan fails (AWB not found).
+// Success and warning are silent to avoid noise in busy dispatch sessions.
 function playBeep(type) {
+  if (type !== 'error') return; // only error sounds
   try {
     const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    const osc = ctx.createOscillator();
+    const osc  = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.connect(gain);
     gain.connect(ctx.destination);
-    if (type === 'success') {
-      // Two ascending tones — pleasant "ding ding"
-      osc.frequency.setValueAtTime(880, ctx.currentTime);
-      osc.frequency.setValueAtTime(1100, ctx.currentTime + 0.12);
-      gain.gain.setValueAtTime(0.3, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.35);
-      osc.start(ctx.currentTime);
-      osc.stop(ctx.currentTime + 0.35);
-    } else if (type === 'warn') {
-      // Single mid tone — "already dispatched" warning
-      osc.frequency.setValueAtTime(660, ctx.currentTime);
-      gain.gain.setValueAtTime(0.25, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
-      osc.start(ctx.currentTime);
-      osc.stop(ctx.currentTime + 0.3);
-    } else {
-      // Two descending low tones — error buzz
-      osc.type = 'sawtooth';
-      osc.frequency.setValueAtTime(300, ctx.currentTime);
-      osc.frequency.setValueAtTime(220, ctx.currentTime + 0.15);
-      gain.gain.setValueAtTime(0.25, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.4);
-      osc.start(ctx.currentTime);
-      osc.stop(ctx.currentTime + 0.4);
-    }
-    // Clean up after playback
+    // Two descending low tones — clear "not found" buzz
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(350, ctx.currentTime);
+    osc.frequency.setValueAtTime(220, ctx.currentTime + 0.18);
+    gain.gain.setValueAtTime(0.3, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.45);
+    osc.start(ctx.currentTime);
+    osc.stop(ctx.currentTime + 0.45);
     setTimeout(() => ctx.close(), 600);
   } catch (_) {
     // Silently ignore if AudioContext unavailable
