@@ -3,8 +3,8 @@ import { toast } from './Toast.jsx';
 
 // Hard-coded credentials for prototype — replace with Supabase Auth later
 const USERS = [
-  { username: 'admin', password: 'lavanya2024', role: 'Admin' },
-  { username: 'staff', password: 'staff123',    role: 'Staff' },
+  { username: 'Lavanyaoms', password: 'lavanyaoms2026', role: 'Admin' },
+  { username: 'admin',      password: 'lavanyaoms2026', role: 'Admin' },
 ];
 
 export default function LoginPage({ onLogin }) {
@@ -68,7 +68,7 @@ export default function LoginPage({ onLogin }) {
         </button>
 
         <p style={{ textAlign: 'center', marginTop: 16, fontSize: 11, color: 'var(--muted)' }}>
-          Demo — admin / lavanya2024
+          Lavanya OMS v12
         </p>
       </div>
     </div>
