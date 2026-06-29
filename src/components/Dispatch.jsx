@@ -1,6 +1,46 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useCallback } from 'react';
 import { toast } from './Toast.jsx';
 import { COMPANIES } from '../db.js';
+
+// ── Sound feedback using Web Audio API (no external files needed) ──────────
+function playBeep(type) {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    if (type === 'success') {
+      // Two ascending tones — pleasant "ding ding"
+      osc.frequency.setValueAtTime(880, ctx.currentTime);
+      osc.frequency.setValueAtTime(1100, ctx.currentTime + 0.12);
+      gain.gain.setValueAtTime(0.3, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.35);
+      osc.start(ctx.currentTime);
+      osc.stop(ctx.currentTime + 0.35);
+    } else if (type === 'warn') {
+      // Single mid tone — "already dispatched" warning
+      osc.frequency.setValueAtTime(660, ctx.currentTime);
+      gain.gain.setValueAtTime(0.25, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
+      osc.start(ctx.currentTime);
+      osc.stop(ctx.currentTime + 0.3);
+    } else {
+      // Two descending low tones — error buzz
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(300, ctx.currentTime);
+      osc.frequency.setValueAtTime(220, ctx.currentTime + 0.15);
+      gain.gain.setValueAtTime(0.25, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.4);
+      osc.start(ctx.currentTime);
+      osc.stop(ctx.currentTime + 0.4);
+    }
+    // Clean up after playback
+    setTimeout(() => ctx.close(), 600);
+  } catch (_) {
+    // Silently ignore if AudioContext unavailable
+  }
+}
 
 // Today's date string for daily courier count reset
 function todayStr() {
@@ -49,10 +89,12 @@ export default function Dispatch({ db, setDb }) {
     const order = findOrder(q);
     if (!order) {
       setResult({ ok: false, msg: `❌ "${q}" not found. Try Order ID or Invoice Ref (IN-xxx).` });
+      playBeep('error');
       return;
     }
     if (order.status === 'Dispatched') {
       setResult({ ok: 'warn', msg: `⚠️ Already dispatched: ${order.orderId}` });
+      playBeep('warn');
       return;
     }
     // If scanning a real AWB for an Amazon order that has only an invoice ref
@@ -68,6 +110,7 @@ export default function Dispatch({ db, setDb }) {
     setScanValue('');
     inputRef.current?.focus();
     toast(`Order ${order.orderId} dispatched`, 'success');
+    playBeep('success');
   }
 
   const dispatched = db.orders.filter((o) => o.status === 'Dispatched' && !o.deleted)
@@ -88,8 +131,9 @@ export default function Dispatch({ db, setDb }) {
       o.awb
         ? /^SF\d{8,13}FPL$/i.test(o.awb) ? 'Shadowfax'
         : /^SF\d+$/i.test(o.awb) ? 'Shadowfax'
-        : /^FMPP|^FMPC|^FM/i.test(o.awb) ? 'Ekart'
+        : /^1490\d{12}$/.test(o.awb) ? 'Delhivery'   // Meesho Delhivery 16-digit — check BEFORE FM/Ekart
         : /^\d{13,18}$/.test(o.awb) ? 'Delhivery'
+        : /^(?:FMPP|FMPC|FM[A-Z])/i.test(o.awb) ? 'Ekart'  // Ekart: FMPP/FMPC/FMxx only, never raw FM on Delhivery
         : 'Other'
         : 'Unknown'
     );
