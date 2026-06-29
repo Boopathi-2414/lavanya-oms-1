@@ -1,65 +1,103 @@
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { toast } from './Toast.jsx';
 import { COMPANIES } from '../db.js';
 
-// ── Sound feedback using Web Audio API — ERROR only ───────────────────────
-// Plays a distinctive buzz only when a scan fails (AWB not found).
-// Success and warning are silent to avoid noise in busy dispatch sessions.
-function playBeep(type) {
-  if (type !== 'error') return; // only error sounds
+// ── LOUD Error Beep ────────────────────────────────────────────────────────
+// எந்த error வந்தாலும் (not found / already scanned / returned) இதே sound.
+// DynamicsCompressor + 3 oscillators → browser-maximum volume.
+// கூடுதலாக screen flash செய்கிறோம் — மொபைலில் திரை பார்க்காமல் தெரியும்.
+function playErrorBeep() {
   try {
     const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    const osc  = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-    // Two descending low tones — clear "not found" buzz
-    osc.type = 'sawtooth';
-    osc.frequency.setValueAtTime(350, ctx.currentTime);
-    osc.frequency.setValueAtTime(220, ctx.currentTime + 0.18);
-    gain.gain.setValueAtTime(0.3, ctx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.45);
-    osc.start(ctx.currentTime);
-    osc.stop(ctx.currentTime + 0.45);
-    setTimeout(() => ctx.close(), 600);
-  } catch (_) {
-    // Silently ignore if AudioContext unavailable
-  }
+    // Resume if suspended (mobile browsers require user-gesture unlock)
+    ctx.resume().then(() => {
+      const compressor = ctx.createDynamicsCompressor();
+      compressor.threshold.value = -3;
+      compressor.knee.value      = 0;
+      compressor.ratio.value     = 20;
+      compressor.attack.value    = 0;
+      compressor.release.value   = 0.05;
+      compressor.connect(ctx.destination);
+
+      // 3 oscillators in unison = louder perceived volume
+      [300, 310, 320].forEach((freq) => {
+        const osc  = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain);
+        gain.connect(compressor);
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(freq, ctx.currentTime);
+        osc.frequency.linearRampToValueAtTime(140, ctx.currentTime + 0.55);
+        gain.gain.setValueAtTime(1.0, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.6);
+        osc.start(ctx.currentTime);
+        osc.stop(ctx.currentTime + 0.6);
+      });
+      setTimeout(() => ctx.close(), 800);
+    });
+  } catch (_) {}
+
+  // Visual flash — red overlay for 300ms (helps on mobile)
+  const flash = document.createElement('div');
+  Object.assign(flash.style, {
+    position: 'fixed', inset: '0', background: 'rgba(220,38,38,0.35)',
+    zIndex: '99999', pointerEvents: 'none', transition: 'opacity 0.2s',
+  });
+  document.body.appendChild(flash);
+  setTimeout(() => { flash.style.opacity = '0'; setTimeout(() => flash.remove(), 250); }, 200);
 }
 
 // Today's date string for daily courier count reset
 function todayStr() {
-  return new Date().toISOString().slice(0, 10); // "YYYY-MM-DD"
+  return new Date().toISOString().slice(0, 10);
 }
 
 export default function Dispatch({ db, setDb }) {
-  const [scanValue, setScanValue] = useState('');
-  const [result,    setResult]    = useState(null);
-  const [fCompany,  setFCompany]  = useState('');
-  const inputRef = useRef();
+  const [scanValue,    setScanValue]    = useState('');
+  const [result,       setResult]       = useState(null);
+  const [fCompany,     setFCompany]     = useState('');
+  const [cameraOpen,   setCameraOpen]   = useState(false);
+  const [cameraError,  setCameraError]  = useState('');
+  const inputRef    = useRef();
+  const videoRef    = useRef();
+  const streamRef   = useRef(null);
+  const scanLoopRef = useRef(null);
 
-  // ── Flexible AWB/Order matching ──────────────────────────────
-  // Normalises the scanned value before comparing so barcode-scanner
-  // quirks (extra spaces, mixed case, leading zeros) never cause a miss.
+  // ── AWB helpers ──────────────────────────────────────────────
   function normalise(s) {
     return (s || '').trim().toUpperCase().replace(/\s+/g, '');
   }
 
-  function findOrder(q) {
-    // Strip "AWB#" or "AWB " prefix that Amazon DELHIVERY labels emit when scanned
+  function extractAwbFromUrl(raw) {
+    const s = (raw || '').trim();
+    if (!s.startsWith('http')) return s;
+    try {
+      const url = new URL(s);
+      for (const key of ['trackingId', 'awbNo', 'awb', 'tracking_id', 'waybill', 'id']) {
+        const v = url.searchParams.get(key);
+        if (v && v.trim()) return v.trim().toUpperCase();
+      }
+      const segments = (url.hash ? url.hash.replace('#', '') : url.pathname)
+        .split('/').filter(Boolean);
+      if (segments.length) {
+        const last = segments[segments.length - 1];
+        if (last && last.length >= 8) return last.toUpperCase();
+      }
+    } catch (_) {}
+    return s;
+  }
+
+  function findOrder(rawQ) {
+    const q       = extractAwbFromUrl(rawQ.trim());
     const stripped = q.replace(/^AWB#?\s*/i, '').trim();
-    const nq = normalise(stripped);
-    const nqOrig = normalise(q);
-    // 1. Exact AWB match — try stripped first, then original
+    const nq      = normalise(stripped);
+    const nqOrig  = normalise(q);
     let o = db.orders.find((x) => !x.deleted && (normalise(x.awb) === nq || normalise(x.awb) === nqOrig));
     if (o) return o;
-    // 2. Order ID match
     o = db.orders.find((x) => !x.deleted && (normalise(x.orderId) === nq || normalise(x.orderId) === nqOrig));
     if (o) return o;
-    // 3. Invoice match
     o = db.orders.find((x) => !x.deleted && (normalise(x.invoice) === nq || normalise(x.invoice) === nqOrig));
     if (o) return o;
-    // 4. Partial AWB match — last 10 digits (for scanners that drop prefix)
     if (nq.length >= 10) {
       const tail = nq.slice(-10);
       o = db.orders.find((x) => !x.deleted && x.awb && normalise(x.awb).endsWith(tail));
@@ -68,65 +106,131 @@ export default function Dispatch({ db, setDb }) {
     return null;
   }
 
-  function processDispatch() {
-    const q = scanValue.trim();
-    if (!q) return;
-    const order = findOrder(q);
+  // ── Process dispatch ─────────────────────────────────────────
+  function processDispatch(rawOverride) {
+    const rawQ = (rawOverride || scanValue).trim();
+    if (!rawQ) return;
+    const q     = extractAwbFromUrl(rawQ);
+    const order = findOrder(rawQ);
     if (!order) {
       setResult({ ok: false, msg: `❌ "${q}" not found. Try Order ID or Invoice Ref (IN-xxx).` });
-      playBeep('error');
+      playErrorBeep();
       return;
     }
     if (order.status === 'Dispatched') {
       setResult({ ok: 'warn', msg: `⚠️ Already dispatched: ${order.orderId}` });
-      playBeep('warn');
+      playErrorBeep();
       return;
     }
-    // If scanning a real AWB for an Amazon order that has only an invoice ref
-    // Supports: plain digits (ATSPL SUR labels) and AWB# prefix (ATSPL_DELHIVERY labels)
+    if (order.status && order.status.includes('Return')) {
+      setResult({ ok: 'warn', msg: `⚠️ Return order — cannot dispatch: ${order.orderId}` });
+      playErrorBeep();
+      return;
+    }
     const cleanQ = q.replace(/^AWB#?\s*/i, '').trim();
     if (order.channel === 'Amazon' && order.awb && order.awb.startsWith('IN-') && /^\d{10,16}$/.test(cleanQ)) {
       order.awb = cleanQ;
     }
-    order.status = 'Dispatched';
+    order.status      = 'Dispatched';
     order.dispatchedAt = new Date().toISOString();
     setDb({ ...db });
     setResult({ ok: true, msg: `✅ Dispatched! ${order.orderId} | ${order.customer} | ${order.channel} | ${order.company || 'Unknown'}` });
     setScanValue('');
     inputRef.current?.focus();
     toast(`Order ${order.orderId} dispatched`, 'success');
-    playBeep('success');
   }
 
-  const dispatched = db.orders.filter((o) => o.status === 'Dispatched' && !o.deleted)
-    .filter((o) => !fCompany || (o.company || 'Unknown') === fCompany)
-    .slice().reverse();
+  // ── Camera / barcode scan ─────────────────────────────────────
+  // Uses BarcodeDetector (Chrome/Android) or falls back to ZXing via CDN
+  async function openCamera() {
+    setCameraError('');
+    setCameraOpen(true);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } },
+      });
+      streamRef.current = stream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play();
+      }
+      startBarcodeLoop();
+    } catch (err) {
+      setCameraError('Camera access denied. Please allow camera permission and try again.');
+      setCameraOpen(false);
+    }
+  }
 
-  // ── Today's courier-wise dispatch count (resets each day) ─────
+  function stopCamera() {
+    if (scanLoopRef.current) { cancelAnimationFrame(scanLoopRef.current); scanLoopRef.current = null; }
+    if (streamRef.current) { streamRef.current.getTracks().forEach((t) => t.stop()); streamRef.current = null; }
+    setCameraOpen(false);
+  }
+
+  // Cleanup on unmount
+  useEffect(() => () => stopCamera(), []);
+
+  function startBarcodeLoop() {
+    const hasBarcodeDetector = 'BarcodeDetector' in window;
+    if (hasBarcodeDetector) {
+      const detector = new window.BarcodeDetector({ formats: ['code_128', 'code_39', 'qr_code', 'data_matrix', 'ean_13', 'ean_8'] });
+      const loop = async () => {
+        if (!videoRef.current || !streamRef.current) return;
+        try {
+          const barcodes = await detector.detect(videoRef.current);
+          if (barcodes.length > 0) {
+            const val = barcodes[0].rawValue;
+            stopCamera();
+            setScanValue(val);
+            setTimeout(() => processDispatch(val), 100);
+            return;
+          }
+        } catch (_) {}
+        scanLoopRef.current = requestAnimationFrame(loop);
+      };
+      scanLoopRef.current = requestAnimationFrame(loop);
+    } else {
+      // Fallback: ZXing via CDN
+      const script = document.createElement('script');
+      script.src = 'https://cdnjs.cloudflare.com/ajax/libs/zxing-js/0.20.0/umd/index.min.js';
+      script.onload = () => {
+        const codeReader = new window.ZXing.BrowserMultiFormatReader();
+        codeReader.decodeFromVideoElement(videoRef.current).then((result) => {
+          const val = result.getText();
+          codeReader.reset();
+          stopCamera();
+          setScanValue(val);
+          setTimeout(() => processDispatch(val), 100);
+        }).catch(() => {});
+        // Store cleanup ref
+        scanLoopRef.current = { cancel: () => codeReader.reset() };
+      };
+      document.head.appendChild(script);
+    }
+  }
+
+  // ── Courier stats ─────────────────────────────────────────────
   const today = todayStr();
   const todayOrders = db.orders.filter(
-    (o) => o.status === 'Dispatched' && !o.deleted &&
-    o.dispatchedAt && o.dispatchedAt.startsWith(today)
+    (o) => o.status === 'Dispatched' && !o.deleted && o.dispatchedAt && o.dispatchedAt.startsWith(today)
   );
-
-  // Build courier breakdown for today's dispatches
   const todayCourierMap = {};
   for (const o of todayOrders) {
     const courier = o.courier || (
       o.awb
-        ? /^SF\d{8,13}FPL$/i.test(o.awb) ? 'Shadowfax'
-        : /^SF\d+$/i.test(o.awb) ? 'Shadowfax'
-        : /^1490\d{12}$/.test(o.awb) ? 'Delhivery'   // Meesho Delhivery 16-digit — check BEFORE FM/Ekart
-        : /^\d{13,18}$/.test(o.awb) ? 'Delhivery'
-        : /^(?:FMPP|FMPC|FM[A-Z])/i.test(o.awb) ? 'Ekart'  // Ekart: FMPP/FMPC/FMxx only, never raw FM on Delhivery
+        ? /^SF\d{8,13}FPL$/i.test(o.awb)   ? 'Shadowfax'
+        : /^SF\d+$/i.test(o.awb)            ? 'Shadowfax'
+        : /^1490\d{12}$/.test(o.awb)        ? 'Delhivery'
+        : /^\d{13,18}$/.test(o.awb)         ? 'Delhivery'
+        : /^(?:FMPP|FMPC|FM[A-Z])/i.test(o.awb) ? 'Ekart'
         : 'Other'
         : 'Unknown'
     );
     todayCourierMap[courier] = (todayCourierMap[courier] || 0) + 1;
   }
-
-  // Feature 5: auto-dispatch segregation — counts always reflect exactly
-  // the company filter selected above, never mixed across companies.
+  const dispatched = db.orders.filter((o) => o.status === 'Dispatched' && !o.deleted)
+    .filter((o) => !fCompany || (o.company || 'Unknown') === fCompany)
+    .slice().reverse();
   const dispatchedCompanyCounts = [...COMPANIES.map((c) => c.name), 'Unknown'].map((name) => ({
     name,
     count: db.orders.filter((o) => o.status === 'Dispatched' && !o.deleted && (o.company || 'Unknown') === name).length,
@@ -134,26 +238,63 @@ export default function Dispatch({ db, setDb }) {
 
   return (
     <div>
+      {/* ── Camera overlay ── */}
+      {cameraOpen && (
+        <div style={{
+          position: 'fixed', inset: 0, background: '#000', zIndex: 9999,
+          display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+        }}>
+          <video ref={videoRef} style={{ width: '100%', maxWidth: 500, borderRadius: 8 }} playsInline muted />
+          <div style={{
+            position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%,-50%)',
+            border: '3px solid #22c55e', width: 260, height: 120, borderRadius: 8, pointerEvents: 'none',
+          }} />
+          <button onClick={stopCamera} style={{
+            marginTop: 24, padding: '12px 32px', background: '#ef4444', color: '#fff',
+            border: 'none', borderRadius: 8, fontSize: 16, fontWeight: 700, cursor: 'pointer',
+          }}>❌ Cancel</button>
+          <p style={{ color: '#fff', marginTop: 12, fontSize: 13 }}>Barcode-ஐ frame-க்கு நேராக காட்டுங்கள்</p>
+        </div>
+      )}
+
       <div className="scanner-box">
         <h3>🔍 Scan AWB to Dispatch</h3>
-        <p>Scan the barcode on the label or type AWB / Order ID / Invoice Ref (IN-xxx)</p>
-        <input
-          ref={inputRef}
-          className="scan-input"
-          type="text"
-          placeholder="Scan or type AWB / Order ID…"
-          value={scanValue}
-          onChange={(e) => setScanValue(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && processDispatch()}
-          autoFocus
-        />
+        <p>Barcode scan / type AWB / Order ID / Invoice Ref (IN-xxx) / Tracking URL</p>
+
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <input
+            ref={inputRef}
+            className="scan-input"
+            type="text"
+            placeholder="Scan or type AWB / Order ID…"
+            value={scanValue}
+            onChange={(e) => setScanValue(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && processDispatch()}
+            autoFocus
+            style={{ flex: 1, minWidth: 200 }}
+          />
+          {/* Camera button — shows on mobile and desktop */}
+          <button
+            onClick={openCamera}
+            title="Camera Scan"
+            style={{
+              padding: '10px 14px', background: '#7c3aed', color: '#fff', border: 'none',
+              borderRadius: 8, fontSize: 20, cursor: 'pointer', lineHeight: 1,
+            }}
+          >📷</button>
+        </div>
+
+        {cameraError && <p style={{ color: 'var(--red)', marginTop: 6, fontSize: 13 }}>{cameraError}</p>}
+
         <div className="mt-2">
-          <button className="btn btn-success" onClick={processDispatch}>Mark as Dispatched</button>
+          <button className="btn btn-success" onClick={() => processDispatch()}>Mark as Dispatched</button>
         </div>
         <div className="scan-result">
           {result && (
-            <div style={{ fontWeight: 600, marginTop: 8,
-              color: result.ok === true ? 'var(--green)' : result.ok === 'warn' ? 'var(--gold)' : 'var(--red)' }}>
+            <div style={{
+              fontWeight: 600, marginTop: 8,
+              color: result.ok === true ? 'var(--green)' : result.ok === 'warn' ? 'var(--gold)' : 'var(--red)',
+            }}>
               {result.msg}
             </div>
           )}
@@ -173,8 +314,6 @@ export default function Dispatch({ db, setDb }) {
           </div>
         </div>
 
-        {/* Feature 5: auto-dispatch segregation summary */}
-        {/* Today's courier-wise dispatch summary */}
         <div className="info-banner" style={{ marginBottom: 8, background: '#f0fdf4', borderColor: '#86efac' }}>
           <strong>📦 இன்றைய Courier Count ({today}):</strong>{' '}
           {Object.keys(todayCourierMap).length === 0
@@ -187,19 +326,14 @@ export default function Dispatch({ db, setDb }) {
             ))
           }
           {todayOrders.length > 0 && (
-            <span style={{ marginLeft: 12, color: 'var(--muted)' }}>
-              (மொத்தம்: {todayOrders.length})
-            </span>
+            <span style={{ marginLeft: 12, color: 'var(--muted)' }}>(மொத்தம்: {todayOrders.length})</span>
           )}
         </div>
 
         <div className="info-banner" style={{ marginBottom: 12 }}>
           <strong>🏢 Dispatched by Company:</strong>{' '}
           {dispatchedCompanyCounts.map((c, i) => (
-            <span key={c.name}>
-              {i > 0 && ' | '}
-              {c.name}: {c.count} Order{c.count === 1 ? '' : 's'}
-            </span>
+            <span key={c.name}>{i > 0 && ' | '}{c.name}: {c.count}</span>
           ))}
         </div>
 
@@ -220,11 +354,7 @@ export default function Dispatch({ db, setDb }) {
                     <td className="truncate" title={o.orderId}>{o.orderId}</td>
                     <td>{o.customer}</td>
                     <td><span className={`chip chip-${(o.channel || '').toLowerCase()}`}>{o.channel}</span></td>
-                    <td>
-                      <span className="chip" style={{ background: '#eef2ff', color: '#3730a3' }}>
-                        {o.company || 'Unknown'}
-                      </span>
-                    </td>
+                    <td><span className="chip" style={{ background: '#eef2ff', color: '#3730a3' }}>{o.company || 'Unknown'}</span></td>
                     <td>{o.awb || '—'}</td>
                     <td className="truncate" title={o.sku}>{o.sku || '—'}</td>
                     <td><span className={`status ${o.payment === 'COD' ? 's-cod' : 's-prepaid'}`}>{o.payment}</span></td>
