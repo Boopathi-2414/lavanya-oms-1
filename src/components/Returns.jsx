@@ -21,40 +21,108 @@ export default function Returns({ db, setDb }) {
     const reader = new FileReader();
     reader.onload = (e) => {
       try {
-        const wb   = XLSX.read(e.target.result, { type: 'array' });
-        const data = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: '' });
-        let updated = 0;
-        let skipped = 0;
+        const wb = XLSX.read(e.target.result, { type: 'array' });
+        const firstSheet = wb.Sheets[wb.SheetNames[0]];
+        const rawRows = XLSX.utils.sheet_to_json(firstSheet, { header: 1, defval: '' });
+
         // Helper: convert Excel scientific notation (1.49083E+15) to full number string
         function fixAwb(val) {
           const s = String(val || '').trim();
-          // If scientific notation like 1.49083E+15 — convert to integer string
           if (/^\d+\.?\d*[Ee][+\-]?\d+$/.test(s)) {
             return BigInt(Math.round(Number(s))).toString();
           }
           return s;
         }
 
-        data.forEach((row) => {
-          const oid = String(row['Order ID'] || row['order_id'] || row['OrderID'] || '').trim();
-          const awb = fixAwb(row['AWB'] || row['Tracking'] || row['AWB Number'] || '');
-          // Accept "Return Type", "ReturnType", "Type" columns
-          const rawType = String(row['Return Type'] || row['ReturnType'] || row['Type'] || '').trim();
+        // Detect Meesho return export (contains "Suborder Number" column header)
+        const isMeeshoReturn = rawRows.slice(0, 10).some(
+          (r) => r.some((c) => String(c).trim() === 'Suborder Number')
+        );
 
-          const order = db.orders.find(
-            (o) => !o.deleted && ((oid && o.orderId === oid) || (awb && (o.awb === awb || o.invoice === awb)))
+        let updated = 0, skipped = 0, awbUpdated = 0;
+
+        if (isMeeshoReturn) {
+          // ── Meesho return CSV format ──────────────────────────────────
+          const headerRowIdx = rawRows.findIndex((r) =>
+            r.some((c) => String(c).trim() === 'Suborder Number')
           );
-          if (!order) { skipped++; return; } // not in our sales — skip
-          order.status      = 'In Transit (Return)';
-          order.transitDate = new Date().toISOString();
-          // Set return_type only if the column was provided; preserve existing value otherwise
-          const normalised = normalizeReturnType(rawType);
-          if (normalised) order.return_type = normalised;
-          updated++;
-        });
+          if (headerRowIdx === -1) throw new Error('"Suborder Number" column not found');
+
+          const headers  = rawRows[headerRowIdx].map((h) => String(h).trim());
+          const dataRows = rawRows.slice(headerRowIdx + 1).filter((r) => r.some((c) => c !== ''));
+
+          const col = (name) => headers.findIndex((h) => h === name);
+          const SUBORDER_COL = col('Suborder Number');
+          const AWB_COL      = col('AWB Number');
+          const TYPE_COL     = col('Type of Return');
+          const STATUS_COL   = col('Status');
+          const COURIER_COL  = col('Courier Partner');
+
+          dataRows.forEach((row) => {
+            const suborderId = String(row[SUBORDER_COL] || '').trim();
+            const returnAwb  = fixAwb(row[AWB_COL] || '');
+            const returnType = String(row[TYPE_COL]  || '').trim();
+            const status     = String(row[STATUS_COL] || '').trim();
+            const courier    = String(row[COURIER_COL] || '').trim();
+
+            if (!suborderId) return;
+
+            // Match by Suborder Number ("301335565432266240_1") or Order Number
+            const order = db.orders.find(
+              (o) => !o.deleted && (
+                o.orderId === suborderId ||
+                o.orderId === suborderId.split('_')[0]
+              )
+            );
+
+            if (!order) { skipped++; return; }
+
+            // Save return AWB separately (dispatch AWB preserved in o.awb)
+            if (returnAwb && order.returnAwb !== returnAwb) {
+              order.returnAwb = returnAwb;
+              awbUpdated++;
+            }
+
+            // Map Meesho return type → internal type
+            const normalised = returnType.includes('Customer')
+              ? 'Customer Return'
+              : (returnType.includes('RTO') || returnType.includes('Courier'))
+                ? 'RTO'
+                : normalizeReturnType(returnType);
+            if (normalised) order.return_type = normalised;
+
+            if (courier) order.returnCourier = courier;
+            order.returnStatus = status;
+            order.status       = 'In Transit (Return)';
+            order.transitDate  = order.transitDate || new Date().toISOString();
+            updated++;
+          });
+
+        } else {
+          // ── Generic / manual format (Order ID + AWB columns) ──────────
+          const data = XLSX.utils.sheet_to_json(firstSheet, { defval: '' });
+
+          data.forEach((row) => {
+            const oid     = String(row['Order ID'] || row['order_id'] || row['OrderID'] || '').trim();
+            const awb     = fixAwb(row['AWB'] || row['Tracking'] || row['AWB Number'] || '');
+            const rawType = String(row['Return Type'] || row['ReturnType'] || row['Type'] || '').trim();
+
+            const order = db.orders.find(
+              (o) => !o.deleted && ((oid && o.orderId === oid) || (awb && (o.awb === awb || o.invoice === awb)))
+            );
+            if (!order) { skipped++; return; }
+            order.status      = 'In Transit (Return)';
+            order.transitDate = new Date().toISOString();
+            const normalised  = normalizeReturnType(rawType);
+            if (normalised) order.return_type = normalised;
+            updated++;
+          });
+        }
+
         setDb({ ...db });
-        const skipMsg = skipped > 0 ? ` (${skipped} skipped — not in sales)` : '';
-        setImportStatus(`✅ Updated ${updated} orders to "In Transit (Return)"${skipMsg}`);
+        const awbMsg  = awbUpdated > 0 ? ` | ${awbUpdated} return AWB updated` : '';
+        const skipMsg = skipped    > 0 ? ` | ${skipped} skipped (not in sales)` : '';
+        setImportStatus(`✅ ${updated} orders → In Transit${awbMsg}${skipMsg}`);
         toast(`${updated} orders marked In Transit${skipped ? `, ${skipped} skipped` : ''}`, 'success');
       } catch (err) { toast('Error: ' + err.message, 'error'); }
     };
@@ -344,7 +412,8 @@ export default function Returns({ db, setDb }) {
                 <th>Order ID</th>
                 <th>Customer</th>
                 <th>Channel</th>
-                <th>AWB</th>
+                <th>Dispatch AWB</th>
+                <th>Return AWB</th>
                 <th>SKU</th>
                 <th>Return Type</th>
                 <th>{activeTab === 'transit' ? 'Transit Date' : 'Received Date'}</th>
@@ -354,7 +423,7 @@ export default function Returns({ db, setDb }) {
             <tbody>
               {displayList.length === 0 ? (
                 <tr>
-                  <td colSpan={activeTab === 'transit' ? 8 : 7}>
+                  <td colSpan={activeTab === 'transit' ? 9 : 8}>
                     <div className="empty">
                       {allTransit.length === 0 && activeTab === 'transit'
                         ? 'No return transit orders. Import an Excel or mark orders from Sales.'
@@ -372,7 +441,13 @@ export default function Returns({ db, setDb }) {
                     <td>
                       <span className={`chip chip-${(o.channel || '').toLowerCase()}`}>{o.channel}</span>
                     </td>
-                    <td>{o.awb || '—'}</td>
+                    <td style={{ fontSize: 12, color: 'var(--muted,#6b7280)' }}>{o.awb || '—'}</td>
+                    <td>
+                      {o.returnAwb
+                        ? <span style={{ fontWeight: 600, color: '#1d4ed8', fontSize: 12 }}>{o.returnAwb}</span>
+                        : <span style={{ color: 'var(--muted,#9ca3af)', fontSize: 12 }}>—</span>
+                      }
+                    </td>
                     <td className="truncate" title={o.sku}>{o.sku || '—'}</td>
 
                     {/* ── Return Type cell — color badge + inline selector (transit only) ── */}
