@@ -101,11 +101,23 @@ export default function Payments({ db, setDb }) {
     if (fileInputRef.current) fileInputRef.current.value = '';
   }
 
+  // Safe date: handles string, Excel serial number, undefined
+  function safeDate(val) {
+    if (!val) return '';
+    if (typeof val === 'number') {
+      try {
+        const d = new Date(Math.round((val - 25569) * 86400 * 1000));
+        return d.toISOString().slice(0, 10);
+      } catch (_) { return ''; }
+    }
+    return String(val);
+  }
+
   // ── Derived: monthly summary ─────────────────────────────────
   const monthlySummary = (() => {
     const map = {};
     (db.payments || []).forEach((p) => {
-      const month = (p.date || '').slice(0, 7) || 'Unknown';
+      const month = safeDate(p.date).slice(0, 7) || 'Unknown';
       if (!map[month]) map[month] = { count: 0, settlement: 0, gstAmount: 0, netAmount: 0 };
       map[month].count++;
       map[month].settlement += p.settlement  || 0;
@@ -266,7 +278,7 @@ export default function Payments({ db, setDb }) {
                           ? <span className="status s-dispatched">✓ Reconciled</span>
                           : <span className="status s-ready">Pending</span>}
                       </td>
-                      <td>{o.pd ? o.pd.date || '—' : '—'}</td>
+                      <td>{o.pd ? safeDate(o.pd.date) || '—' : '—'}</td>
                     </tr>
                   ))}
                 </tbody>
