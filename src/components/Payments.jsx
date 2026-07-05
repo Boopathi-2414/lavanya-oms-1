@@ -8,6 +8,7 @@ export default function Payments({ db, setDb }) {
   const [search,       setSearch]       = useState('');
   const [fRecon,       setFRecon]       = useState('');
   const [activeTab,    setActiveTab]    = useState('reconcile');
+  const [overwrite,    setOverwrite]    = useState(false); // overwrite existing payments
   const fileInputRef = useRef();
 
   // ── Payment import ───────────────────────────────────────────
@@ -53,10 +54,11 @@ export default function Payments({ db, setDb }) {
           });
           if (!salesOrder) { notInSales++; return; }
 
-          // Skip duplicate payment
-          if (db.payments.find((p) => p.orderId === orderId)) {
-            skipped++;
-            return;
+          // Skip duplicate payment (unless overwrite mode)
+          const existingIdx = db.payments.findIndex((p) => p.orderId === orderId);
+          if (existingIdx !== -1) {
+            if (!overwrite) { skipped++; return; }
+            db.payments.splice(existingIdx, 1); // remove old, re-add below
           }
 
           const settlement = parseFloat(
@@ -192,6 +194,17 @@ export default function Payments({ db, setDb }) {
                 style={{ display: 'none' }}
                 onChange={(e) => importPaymentExcel(e.target.files[0])}
               />
+            </div>
+            <div style={{ marginTop: 10, display: 'flex', alignItems: 'center', gap: 8 }}>
+              <input
+                type="checkbox"
+                id="overwrite-chk"
+                checked={overwrite}
+                onChange={(e) => setOverwrite(e.target.checked)}
+              />
+              <label htmlFor="overwrite-chk" style={{ fontSize: 13, cursor: 'pointer', color: overwrite ? 'var(--red,#dc2626)' : 'var(--muted,#6b7280)' }}>
+                {overwrite ? '⚠️ Overwrite mode ON — existing payments will be replaced' : 'Overwrite existing payments (off by default)'}
+              </label>
             </div>
             {importStatus && (
               <div style={{ color: 'var(--green)', fontWeight: 600, marginTop: 8 }}>
