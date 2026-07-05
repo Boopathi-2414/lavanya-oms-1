@@ -33,9 +33,24 @@ export default function Payments({ db, setDb }) {
           if (!orderId) return;
 
           // Must exist in Sales Entry
-          const salesOrder = db.orders.find(
-            (o) => !o.deleted && o.orderId === orderId
-          );
+          // Supports all 3 platforms:
+          // Meesho:   "302865490123306432_1" or "302865490123306432"
+          // Amazon:   "403-1234567-8901234"
+          // Flipkart: "OD123456789012345678"
+          const normalise = (id) => (id || '').trim().toLowerCase();
+          const nOid = normalise(orderId);
+          const salesOrder = db.orders.find((o) => {
+            if (o.deleted) return false;
+            const nOrder = normalise(o.orderId);
+            // Exact match
+            if (nOrder === nOid) return true;
+            // Meesho: match with or without _1 suffix
+            if (nOid.includes('_') && nOrder === nOid.split('_')[0]) return true;
+            if (nOrder.includes('_') && nOrder.split('_')[0] === nOid) return true;
+            // Amazon: match ignoring hyphens
+            if (nOrder.replace(/-/g, '') === nOid.replace(/-/g, '')) return true;
+            return false;
+          });
           if (!salesOrder) { notInSales++; return; }
 
           // Skip duplicate payment
