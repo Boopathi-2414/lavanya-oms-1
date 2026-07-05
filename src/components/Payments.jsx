@@ -13,6 +13,8 @@ export default function Payments({ db, setDb }) {
   const claimInputRef  = useRef();
 
   // ── Standard payment import ──────────────────────────────────
+  // Columns needed: Order ID, Settlement Amount, GST %
+  // GST auto-deducted: Net = Settlement - (Settlement * GST% / 100)
   function importPaymentExcel(file) {
     if (!file) return;
     const reader = new FileReader();
@@ -22,22 +24,51 @@ export default function Payments({ db, setDb }) {
         const data = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: '' });
         let added = 0;
         data.forEach((row) => {
-          const orderId = String(row['Order ID'] || row['order_id'] || row['OrderID'] || '').trim();
-          const awb     = String(row['AWB'] || row['Tracking'] || '').trim();
-          if (!orderId && !awb) return;
-          if (!db.payments.find((p) => p.orderId === orderId)) {
-            db.payments.push({
-              id: genId(), orderId, awb,
-              settlement: parseFloat(row['Settlement'] || row['Settlement Amount'] || row['Net Settlement'] || 0),
-              gst:        parseFloat(row['GST'] || row['Tax'] || 0),
-              date:       row['Date'] || row['Settlement Date'] || '',
-              status:     row['Status'] || 'Received',
-              reconciled: true,
-            });
-            const o = db.orders.find((x) => x.orderId === orderId || x.awb === awb || x.invoice === awb);
-            if (o) o.reconciled = true;
-            added++;
+          // Order ID — required
+          const orderId = String(
+            row['Order ID'] || row['order_id'] || row['OrderID'] ||
+            row['Suborder Number'] || row['Sub Order No'] || ''
+          ).trim();
+          if (!orderId) return;
+
+          // Settlement Amount
+          const settlement = parseFloat(
+            row['Settlement Amount'] || row['Settlement'] ||
+            row['Net Settlement'] || row['Amount'] || 0
+          );
+
+          // GST % (e.g. 18 means 18%)
+          const gstPct = parseFloat(
+            row['GST %'] || row['GST Percent'] || row['GST'] ||
+            row['Tax %'] || row['Tax'] || 0
+          );
+
+          // Auto-calculate GST amount and net amount
+          const gstAmount = gstPct > 0 ? parseFloat(((settlement * gstPct) / (100 + gstPct)).toFixed(2)) : 0;
+          const netAmount = parseFloat((settlement - gstAmount).toFixed(2));
+
+          // Skip duplicate
+          if (db.payments.find((p) => p.orderId === orderId)) return;
+
+          db.payments.push({
+            id: genId(),
+            orderId,
+            settlement,
+            gstPct,
+            gstAmount,
+            netAmount,           // settlement minus GST
+            date:   String(row['Date'] || row['Settlement Date'] || '').trim(),
+            status: String(row['Status'] || 'Received').trim(),
+            reconciled: true,
+          });
+
+          // Mark order as reconciled
+          const o = db.orders.find((x) => x.orderId === orderId);
+          if (o) {
+            o.reconciled  = true;
+            o.netReceived = netAmount;
           }
+          added++;
         });
         setDb({ ...db });
         setImportStatus(`✅ Imported ${added} payment record(s)`);
@@ -48,7 +79,7 @@ export default function Payments({ db, setDb }) {
     if (fileInputRef.current) fileInputRef.current.value = '';
   }
 
-  // ── Feature 3: Claim Payment Excel import ───────────────────
+  // ── Claim Payment Excel import ───────────────────────────────
   function importClaimExcel(file) {
     if (!file) return;
     const reader = new FileReader();
@@ -61,23 +92,15 @@ export default function Payments({ db, setDb }) {
 
         data.forEach((row) => {
           const orderId     = String(row['Order ID'] || row['order_id'] || row['OrderID'] || '').trim();
-          const awb         = String(row['AWB'] || row['AWB Number'] || row['Tracking'] || '').trim();
           const claimAmount = parseFloat(
             row['Claim Amount'] || row['claim_amount'] || row['ClaimAmount'] || row['Amount'] || 0
           );
-          const reason      = String(row['Reason'] || row['Notes'] || '').trim();
-          const claimDate   = String(row['Date'] || row['Claim Date'] || '').trim();
+          const reason    = String(row['Reason'] || row['Notes'] || '').trim();
+          const claimDate = String(row['Date'] || row['Claim Date'] || '').trim();
 
-          if (!orderId && !awb) return;
-          if (!claimAmount || isNaN(claimAmount)) return;
+          if (!orderId || !claimAmount || isNaN(claimAmount)) return;
 
-          // Match order by Order ID or AWB / Invoice
-          const order = db.orders.find(
-            (o) => !o.deleted &&
-              ((orderId && o.orderId === orderId) ||
-               (awb && (o.awb === awb || o.invoice === awb)))
-          );
-
+          const order = db.orders.find((o) => !o.deleted && o.orderId === orderId);
           if (order) {
             order.claimAmount = claimAmount;
             order.claimReason = reason;
@@ -85,7 +108,7 @@ export default function Payments({ db, setDb }) {
             order.claimStatus = 'Received';
             matched++;
           } else {
-            notFoundIds.push(orderId || awb);
+            notFoundIds.push(orderId);
             notFound++;
           }
         });
@@ -106,16 +129,29 @@ export default function Payments({ db, setDb }) {
     .filter((o) => !o.deleted)
     .map((o) => ({
       ...o,
-      pd: db.payments.find((p) => p.orderId === o.orderId || p.awb === o.awb || p.awb === o.invoice),
+      pd: db.payments.find((p) => p.orderId === o.orderId),
     }))
     .filter((o) => {
-      if (q && !`${o.orderId} ${o.awb || ''} ${o.invoice || ''}`.toLowerCase().includes(q)) return false;
+      if (q && !`${o.orderId} ${o.customer || ''}`.toLowerCase().includes(q)) return false;
       if (fRecon === 'yes' && !o.pd) return false;
       if (fRecon === 'no'  &&  o.pd) return false;
       return true;
     });
 
-  // Claim rows: orders with negative balance or a claimAmount
+  // Monthly summary — group payments by month
+  const monthlySummary = (() => {
+    const map = {};
+    db.payments.forEach((p) => {
+      const month = p.date ? p.date.slice(0, 7) : 'Unknown';
+      if (!map[month]) map[month] = { settlement: 0, gstAmount: 0, netAmount: 0, count: 0 };
+      map[month].settlement += p.settlement || 0;
+      map[month].gstAmount  += p.gstAmount  || 0;
+      map[month].netAmount  += p.netAmount  || 0;
+      map[month].count++;
+    });
+    return Object.entries(map).sort((a, b) => b[0].localeCompare(a[0]));
+  })();
+
   const claimRows = db.orders
     .filter((o) => !o.deleted)
     .filter((o) => (o.amount < 0) || o.claimAmount)
@@ -127,24 +163,20 @@ export default function Payments({ db, setDb }) {
   return (
     <div>
       {/* Tab switcher */}
-      <div style={{ display: 'flex', gap: 10, marginBottom: 20 }}>
-        <button
-          className={`btn ${activeTab === 'reconcile' ? 'btn-primary' : 'btn-ghost'}`}
-          onClick={() => setActiveTab('reconcile')}
-        >
-          💰 Payment Reconciliation
-        </button>
-        <button
-          className={`btn ${activeTab === 'claims' ? 'btn-primary' : 'btn-ghost'}`}
-          onClick={() => setActiveTab('claims')}
-        >
-          🧾 Claim Payments
-          {claimRows.length > 0 && (
-            <span style={{ marginLeft: 6, background: '#ef4444', color: '#fff', borderRadius: 10, padding: '1px 7px', fontSize: 11 }}>
-              {claimRows.length}
-            </span>
-          )}
-        </button>
+      <div style={{ display: 'flex', gap: 10, marginBottom: 20, flexWrap: 'wrap' }}>
+        {[
+          { key: 'reconcile', label: '💰 Payment Reconciliation' },
+          { key: 'monthly',   label: '📅 Monthly Report' },
+          { key: 'claims',    label: `🧾 Claim Payments${claimRows.length > 0 ? ` (${claimRows.length})` : ''}` },
+        ].map(({ key, label }) => (
+          <button
+            key={key}
+            className={`btn ${activeTab === key ? 'btn-primary' : 'btn-ghost'}`}
+            onClick={() => setActiveTab(key)}
+          >
+            {label}
+          </button>
+        ))}
       </div>
 
       {/* ── RECONCILIATION TAB ── */}
@@ -152,10 +184,14 @@ export default function Payments({ db, setDb }) {
         <>
           <div className="card">
             <div className="card-title">💰 Import Payment / Settlement Excel</div>
+            <div className="info-banner">
+              Columns needed: <strong>Order ID</strong>, <strong>Settlement Amount</strong>, <strong>GST %</strong>, Date (optional).<br />
+              GST will be auto-deducted from Settlement Amount to show Net Received.
+            </div>
             <div className="upload-zone" onClick={() => fileInputRef.current?.click()}>
               <div className="ico-big">💳</div>
-              <p><strong>Click to upload</strong> Master Template Excel</p>
-              <p>Columns: Order ID, AWB, Settlement Amount, GST, Date</p>
+              <p><strong>Click to upload</strong> Settlement Excel / CSV</p>
+              <p>Columns: Order ID · Settlement Amount · GST % · Date</p>
               <input ref={fileInputRef} type="file" accept=".xlsx,.xls,.csv"
                 style={{ display: 'none' }}
                 onChange={(e) => importPaymentExcel(e.target.files[0])} />
@@ -163,18 +199,13 @@ export default function Payments({ db, setDb }) {
             {importStatus && (
               <div style={{ color: 'var(--green)', fontWeight: 600, marginTop: 8 }}>{importStatus}</div>
             )}
-            <div style={{ marginTop: 10 }}>
-              <button className="btn btn-ghost btn-sm" onClick={() => downloadTemplate('payments')}>
-                ⬇ Download Template
-              </button>
-            </div>
           </div>
 
           <div className="card">
             <div className="card-title">📋 Payment Reconciliation</div>
             <div className="filter-bar">
               <div className="fg"><label>Search</label>
-                <input type="text" placeholder="Order ID or AWB…" value={search}
+                <input type="text" placeholder="Order ID or Customer…" value={search}
                   onChange={(e) => setSearch(e.target.value)} />
               </div>
               <div className="fg"><label>Reconciled</label>
@@ -189,26 +220,37 @@ export default function Payments({ db, setDb }) {
               <table>
                 <thead>
                   <tr>
-                    <th>Order ID</th><th>AWB / Ref</th><th>Customer</th><th>Channel</th>
-                    <th>Order Amt</th><th>Settlement</th><th>GST</th><th>Claim Amt</th><th>Reconciled</th><th>Date</th>
+                    <th>Order ID</th>
+                    <th>Customer</th>
+                    <th>Channel</th>
+                    <th>Order Amt</th>
+                    <th>Settlement</th>
+                    <th>GST %</th>
+                    <th>GST Amt</th>
+                    <th>Net Received</th>
+                    <th>Claim Amt</th>
+                    <th>Reconciled</th>
+                    <th>Date</th>
                   </tr>
                 </thead>
                 <tbody>
                   {rows.length === 0 ? (
-                    <tr><td colSpan={10}><div className="empty">No payment data. Import settlement Excel above.</div></td></tr>
+                    <tr><td colSpan={11}><div className="empty">No payment data. Import settlement Excel above.</div></td></tr>
                   ) : (
                     rows.map((o) => (
                       <tr key={o.id}>
                         <td className="truncate" title={o.orderId}>{o.orderId}</td>
-                        <td>{o.awb || '—'}</td>
                         <td>{o.customer}</td>
                         <td><span className={`chip chip-${(o.channel || '').toLowerCase()}`}>{o.channel}</span></td>
                         <td style={{ color: (o.amount || 0) < 0 ? 'var(--red)' : '' }}>
                           ₹{(o.amount || 0).toLocaleString('en-IN')}
                         </td>
                         <td>{o.pd ? `₹${o.pd.settlement.toLocaleString('en-IN')}` : <span className="text-muted">—</span>}</td>
-                        <td>{o.pd ? `₹${o.pd.gst}` : '—'}</td>
-                        {/* Feature 3: Claim amount column */}
+                        <td>{o.pd ? `${o.pd.gstPct || 0}%` : '—'}</td>
+                        <td style={{ color: 'var(--red)' }}>{o.pd ? `₹${o.pd.gstAmount}` : '—'}</td>
+                        <td style={{ color: 'var(--green)', fontWeight: 600 }}>
+                          {o.pd ? `₹${o.pd.netAmount.toLocaleString('en-IN')}` : <span className="text-muted">—</span>}
+                        </td>
                         <td>
                           {o.claimAmount
                             ? <span style={{ color: 'var(--green)', fontWeight: 600 }}>₹{o.claimAmount.toLocaleString('en-IN')}</span>
@@ -218,7 +260,7 @@ export default function Payments({ db, setDb }) {
                           ? <span className="status s-dispatched">✓ Yes</span>
                           : <span className="status s-ready">Pending</span>}
                         </td>
-                        <td>{o.pd?.date || o.orderDate || '—'}</td>
+                        <td>{o.pd?.date || '—'}</td>
                       </tr>
                     ))
                   )}
@@ -229,20 +271,69 @@ export default function Payments({ db, setDb }) {
         </>
       )}
 
-      {/* ── CLAIM PAYMENTS TAB (Feature 3) ── */}
+      {/* ── MONTHLY REPORT TAB ── */}
+      {activeTab === 'monthly' && (
+        <div className="card">
+          <div className="card-title">📅 Monthly Payment Report</div>
+          <p style={{ fontSize: 13, color: 'var(--muted)', marginBottom: 14 }}>
+            Settlement → GST deducted → Net Received per month.
+          </p>
+          {monthlySummary.length === 0 ? (
+            <div className="empty">No payment data yet. Import settlement Excel in Reconciliation tab.</div>
+          ) : (
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Month</th>
+                    <th>Orders</th>
+                    <th>Total Settlement</th>
+                    <th>Total GST Deducted</th>
+                    <th>Net Received</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {monthlySummary.map(([month, s]) => (
+                    <tr key={month}>
+                      <td style={{ fontWeight: 600 }}>{month}</td>
+                      <td>{s.count}</td>
+                      <td>₹{s.settlement.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                      <td style={{ color: 'var(--red)' }}>
+                        − ₹{s.gstAmount.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </td>
+                      <td style={{ color: 'var(--green)', fontWeight: 700, fontSize: 15 }}>
+                        ₹{s.netAmount.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </td>
+                    </tr>
+                  ))}
+                  {/* Grand Total row */}
+                  <tr style={{ background: 'var(--bg-alt, #f9fafb)', fontWeight: 700 }}>
+                    <td>Grand Total</td>
+                    <td>{monthlySummary.reduce((a, [, s]) => a + s.count, 0)}</td>
+                    <td>₹{monthlySummary.reduce((a, [, s]) => a + s.settlement, 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+                    <td style={{ color: 'var(--red)' }}>
+                      − ₹{monthlySummary.reduce((a, [, s]) => a + s.gstAmount, 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                    </td>
+                    <td style={{ color: 'var(--green)', fontSize: 16 }}>
+                      ₹{monthlySummary.reduce((a, [, s]) => a + s.netAmount, 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── CLAIM PAYMENTS TAB ── */}
       {activeTab === 'claims' && (
         <>
           <div className="card">
-            <div className="card-title">🧾 Upload Claim Amounts (Marketplace Reimbursements)</div>
-            <div className="info-banner">
-              <strong>ℹ️ How it works:</strong> When a marketplace reimburses you for a damaged/wrong item return,
-              upload the Excel file with <strong>Order ID / AWB</strong> and <strong>Claim Amount</strong>.
-              The system will match and offset the negative return balance.
-            </div>
+            <div className="card-title">🧾 Upload Claim Amounts</div>
             <div className="upload-zone" onClick={() => claimInputRef.current?.click()}>
               <div className="ico-big">📤</div>
               <p><strong>Click to upload</strong> Claim Reimbursement Excel</p>
-              <p>Columns: Order ID, AWB, Claim Amount, Reason, Date</p>
+              <p>Columns: Order ID · Claim Amount · Reason · Date</p>
               <input ref={claimInputRef} type="file" accept=".xlsx,.xls,.csv"
                 style={{ display: 'none' }}
                 onChange={(e) => importClaimExcel(e.target.files[0])} />
@@ -252,34 +343,26 @@ export default function Payments({ db, setDb }) {
                 {claimStatus}
               </div>
             )}
-            <div style={{ marginTop: 10 }}>
-              <button className="btn btn-ghost btn-sm" onClick={() => downloadTemplate('claims')}>
-                ⬇ Download Claim Template
-              </button>
-            </div>
           </div>
 
           <div className="card">
             <div className="card-title">📋 Return / Claim Ledger</div>
-            <p style={{ fontSize: 13, color: 'var(--muted)', marginBottom: 12 }}>
-              Orders with negative balances (returns) and their claim offsets. Net Balance = Order Amt + Claim Amt.
-            </p>
             <div className="table-wrap">
               <table>
                 <thead>
                   <tr>
-                    <th>Order ID</th><th>Customer</th><th>Channel</th><th>AWB</th>
-                    <th>Order Amt</th><th>Claim Amt</th><th>Net Balance</th><th>Claim Status</th><th>Claim Date</th><th>Reason</th>
+                    <th>Order ID</th><th>Customer</th><th>Channel</th>
+                    <th>Order Amt</th><th>Claim Amt</th><th>Net Balance</th>
+                    <th>Claim Status</th><th>Claim Date</th><th>Reason</th>
                   </tr>
                 </thead>
                 <tbody>
                   {claimRows.length === 0 ? (
                     <tr>
-                      <td colSpan={10}>
+                      <td colSpan={9}>
                         <div className="empty">
                           <div className="big">🧾</div>
-                          No claim or negative entries yet.<br />
-                          <span style={{ fontSize: 12 }}>Upload a Claim Excel above, or negative returns will appear here automatically.</span>
+                          No claim entries yet.
                         </div>
                       </td>
                     </tr>
@@ -289,7 +372,6 @@ export default function Payments({ db, setDb }) {
                         <td className="truncate" title={o.orderId}>{o.orderId}</td>
                         <td>{o.customer}</td>
                         <td><span className={`chip chip-${(o.channel || '').toLowerCase()}`}>{o.channel}</span></td>
-                        <td>{o.awb || '—'}</td>
                         <td style={{ color: 'var(--red)', fontWeight: 600 }}>₹{(o.amount || 0).toLocaleString('en-IN')}</td>
                         <td style={{ color: 'var(--green)', fontWeight: 600 }}>
                           {o.claimAmount ? `₹${o.claimAmount.toLocaleString('en-IN')}` : '—'}
