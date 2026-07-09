@@ -125,9 +125,28 @@ export function awbText(o) {
 }
 
 // ── EXCHANGE DETECTION ───────────────────────────────────────
-// Returns true if the page text contains exchange/replacement keywords
+// Returns true if the page text contains exchange/replacement keywords.
+//
+// Previously this used \b(word)\b boundaries. That silently misses the
+// keyword whenever the PDF's text layer glues two words together with no
+// space in between (e.g. "EXCHANGEORDER" as a single token) — pdfjs does
+// this on some Amazon/Flipkart/Meesho label templates depending on how
+// the label was generated. A plain case-insensitive substring search is
+// more forgiving and doesn't have that failure mode; false positives are
+// effectively a non-issue here since none of these words show up
+// incidentally on a shipping label.
 export function detectExchange(pageText) {
-  return /\b(exchange\s+order|exchange|replacement|replace|exchange\s+item|return\s+&\s+exchange)\b/i.test(pageText);
+  const s = (pageText || '').toLowerCase();
+  const KEYWORDS = [
+    'exchange',        // covers "exchange order", "size exchange", "colour/color exchange", etc.
+    'replacement',      // "replacement order", "replacement item"
+    'replace order',
+    'replace item',
+    'exch order',       // some labels abbreviate "Exch" instead of "Exchange"
+    'exch item',
+    'reshipment',
+  ];
+  return KEYWORDS.some((k) => s.includes(k));
 }
 
 // ── FRAUD CHECK ──────────────────────────────────────────────
@@ -1613,7 +1632,43 @@ export function flattenCourierBreakdown(orders) {
   return rows.sort((a, b) => b.total - a.total);
 }
 
-// ── Return Analytics: Platform → SKU → Return Reason ──────────────────────
+// ── Profit Analysis: Net Received (post-GST, from Payments) − Purchase
+// Cost (SKU rate × qty, from the Purchase Rate DB) = Net Profit ──────────
+// Only orders that already have a matching payment record are included —
+// profit isn't knowable until the actual settlement (net of GST) is in.
+// An order whose SKU has no rate set in Products still shows up (so
+// nothing is silently dropped) but with purchaseCost/profit as null and
+// rateMissing: true, so the UI can flag it separately instead of quietly
+// treating the missing cost as ₹0.
+export function buildProfitRows(orders, payments, products) {
+  const active = (orders || []).filter((o) => !o.deleted);
+  const paymentByOrderId = new Map((payments || []).map((p) => [p.orderId, p]));
+  const rateBySku = new Map((products || []).map((p) => [(p.sku || '').trim().toLowerCase(), p.rate || 0]));
+
+  const rows = [];
+  for (const o of active) {
+    const payment = paymentByOrderId.get(o.orderId);
+    if (!payment) continue; // not reconciled yet — no net amount to compute profit from
+
+    const skuKey   = (o.sku || '').trim().toLowerCase();
+    const hasRate  = rateBySku.has(skuKey) && skuKey !== '';
+    const rate     = hasRate ? rateBySku.get(skuKey) : null;
+    const qty      = o.quantity || 1;
+    const netReceived  = payment.netAmount || 0;
+    const purchaseCost = hasRate ? rate * qty : null;
+    const profit       = hasRate ? netReceived - purchaseCost : null;
+    const marginPct    = (hasRate && netReceived > 0) ? (profit / netReceived) * 100 : null;
+
+    rows.push({
+      id: o.id, orderId: o.orderId, customer: o.customer, channel: o.channel || 'Unknown',
+      sku: o.sku || 'Unknown SKU', quantity: qty,
+      netReceived, purchaseRate: rate, purchaseCost, profit, marginPct,
+      rateMissing: !hasRate,
+      orderDate: o.orderDate || '',
+    });
+  }
+  return rows;
+}
 // Same idea as buildCourierBreakdown/flattenCourierBreakdown above, just
 // grouped by SKU instead of courier, so high-return SKUs surface for
 // inventory and listing decisions.
