@@ -3,7 +3,7 @@ import * as XLSX from 'xlsx';
 import { genId } from '../db.js';
 import { toast } from './Toast.jsx';
 
-const EMPTY_FORM = { sku: '', rate: '' };
+const EMPTY_FORM = { sku: '', category: '', rate: '' };
 
 export default function Products({ db, setDb }) {
   const [search,      setSearch]      = useState('');
@@ -20,13 +20,13 @@ export default function Products({ db, setDb }) {
 
   function openEdit(p) {
     setEditingId(p.id);
-    setForm({ sku: p.sku, rate: p.rate || '' });
+    setForm({ sku: p.sku, category: p.category || '', rate: p.rate || '' });
     setShowModal(true);
   }
 
   function saveProduct() {
     if (!form.sku.trim()) { toast('SKU / Product name required', 'error'); return; }
-    const data = { sku: form.sku.trim(), rate: parseFloat(form.rate) || 0 };
+    const data = { sku: form.sku.trim(), category: form.category.trim(), rate: parseFloat(form.rate) || 0 };
     if (editingId) {
       const idx = db.products.findIndex((p) => p.id === editingId);
       if (idx !== -1) db.products[idx] = { ...db.products[idx], ...data };
@@ -61,9 +61,11 @@ export default function Products({ db, setDb }) {
             row['Name'] || row['Item'] || ''
           ).trim();
           if (!sku || db.products.find((p) => p.sku === sku)) return;
+          const category = String(row['Category'] || row['Product Category'] || '').trim();
           db.products.push({
             id:   genId(),
             sku,
+            category,
             rate: parseFloat(row['Purchase Rate'] || row['Rate'] || row['Cost'] || 0),
             createdAt: new Date().toISOString(),
           });
@@ -98,7 +100,7 @@ export default function Products({ db, setDb }) {
         </div>
 
         <div className="info-banner">
-          Import Excel with columns: <strong>SKU</strong> (or Product Name) · <strong>Purchase Rate</strong>
+          Import Excel with columns: <strong>SKU</strong> (or Product Name) · <strong>Category</strong> (optional, used for Return Analytics grouping) · <strong>Purchase Rate</strong>
         </div>
 
         <div className="filter-bar">
@@ -113,6 +115,7 @@ export default function Products({ db, setDb }) {
             <thead>
               <tr>
                 <th>SKU / Product Name</th>
+                <th>Category</th>
                 <th>Purchase Rate (₹)</th>
                 <th>Actions</th>
               </tr>
@@ -120,7 +123,7 @@ export default function Products({ db, setDb }) {
             <tbody>
               {products.length === 0 ? (
                 <tr>
-                  <td colSpan={3}>
+                  <td colSpan={4}>
                     <div className="empty">
                       <div className="big">🏷️</div>
                       No products. Add manually or import Excel.
@@ -131,6 +134,7 @@ export default function Products({ db, setDb }) {
                 products.map((p) => (
                   <tr key={p.id}>
                     <td className="font-bold">{p.sku}</td>
+                    <td>{p.category || <span style={{ color: 'var(--muted,#9ca3af)' }}>Uncategorized</span>}</td>
                     <td>₹{(p.rate || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
                     <td style={{ whiteSpace: 'nowrap' }}>
                       <button className="btn btn-ghost btn-xs" onClick={() => openEdit(p)}>✏️</button>{' '}
@@ -158,6 +162,13 @@ export default function Products({ db, setDb }) {
                 <label>Purchase Rate (₹)</label>
                 <input type="number" placeholder="0.00" step="0.01" value={form.rate}
                   onChange={(e) => setForm({ ...form, rate: e.target.value })} />
+              </div>
+            </div>
+            <div className="form-row">
+              <div>
+                <label>Category (optional)</label>
+                <input type="text" placeholder="e.g. Aari Hooks, Fabric Stickers" value={form.category}
+                  onChange={(e) => setForm({ ...form, category: e.target.value })} />
               </div>
             </div>
             <div className="modal-footer">
