@@ -39,7 +39,7 @@ export function today() {
 
 const TEMPLATES = {
   payments: 'Order ID,AWB,Settlement Amount,GST,Date',
-  returns:  'Order ID,AWB,Status,Return Type',   // Return Type = "Customer Return" | "RTO"
+  returns:  'Order ID,AWB,Status,Return Type,Return Reason',   // Return Type = "Customer Return" | "RTO"; Return Reason = see RETURN_REASONS
   products: 'SKU,HSN,Category,Purchase Rate,MRP,Stock',
   claims:   'Order ID,AWB,Claim Amount,Reason,Date',
 };
@@ -68,6 +68,26 @@ export function normalizeReturnType(raw) {
   if (/customer|cust|buyer/i.test(s)) return 'Customer Return';
   if (/rto|undeliver|return\s+to\s+origin/i.test(s)) return 'RTO';
   return '';
+}
+
+// ── RETURN REASON helpers ────────────────────────────────────
+// Why the item actually came back (separate from RETURN_TYPES above,
+// which only says whether it was courier-returned or customer-returned).
+// Mandatory on every return record so SKU/category-level return analytics
+// (see buildReturnAnalytics below) can be broken down by root cause.
+export const RETURN_REASONS = ['Size Issue', 'Quality Issue', 'Wrong Item Sent', 'Customer Changed Mind', 'Others'];
+
+// Best-effort match for reasons coming from an Excel import (free text).
+export function normalizeReturnReason(raw) {
+  const s = (raw || '').trim().toLowerCase();
+  if (!s) return '';
+  const hit = RETURN_REASONS.find((r) => r.toLowerCase() === s);
+  if (hit) return hit;
+  if (/size/.test(s)) return 'Size Issue';
+  if (/quality|defect|damage/.test(s)) return 'Quality Issue';
+  if (/wrong\s*item|wrong\s*product/.test(s)) return 'Wrong Item Sent';
+  if (/changed?\s*mind|no\s*longer\s*(need|want)/.test(s)) return 'Customer Changed Mind';
+  return 'Others';
 }
 
 export function downloadTemplate(type) {
@@ -1591,4 +1611,74 @@ export function flattenCourierBreakdown(orders) {
     }
   }
   return rows.sort((a, b) => b.total - a.total);
+}
+
+// ── Return Analytics: Platform → Category → SKU → Return Reason ──────────
+// Same idea as buildCourierBreakdown/flattenCourierBreakdown above, just
+// grouped by category/SKU instead of courier, so high-return SKUs surface
+// for inventory and listing decisions.
+
+// Category comes from the Purchase Rate DB (Products) if the SKU has been
+// tagged there. SKUs with no matching product, or a product with no
+// category set, fall under "Uncategorized" rather than being dropped.
+export function getSkuCategory(sku, products) {
+  const s = (sku || '').trim().toLowerCase();
+  if (!s) return 'Uncategorized';
+  const p = (products || []).find((x) => (x.sku || '').trim().toLowerCase() === s);
+  return (p && p.category && p.category.trim()) || 'Uncategorized';
+}
+
+// "Dispatched" = the order has ever been handed to a courier, i.e. its
+// current status is Dispatched or further down the pipeline. "Ready to
+// Ship" orders never left the warehouse, so they can't count toward a
+// return rate for that SKU.
+const DISPATCHED_OR_BEYOND = ['Dispatched', 'In Transit (Return)', 'Return Received'];
+const RETURN_STATUSES      = ['In Transit (Return)', 'Return Received'];
+
+export function buildReturnAnalytics(orders, products) {
+  const active = (orders || []).filter((o) => !o.deleted);
+  const tree = {}; // { [channel]: { [category]: { [sku]: { dispatched, returned, byReason } } } }
+  for (const o of active) {
+    if (!DISPATCHED_OR_BEYOND.includes(o.status)) continue;
+    const channel  = o.channel || 'Unknown';
+    const category = getSkuCategory(o.sku, products);
+    const sku      = o.sku || 'Unknown SKU';
+    if (!tree[channel]) tree[channel] = {};
+    if (!tree[channel][category]) tree[channel][category] = {};
+    if (!tree[channel][category][sku]) tree[channel][category][sku] = { dispatched: 0, returned: 0, byReason: {} };
+    const bucket = tree[channel][category][sku];
+    bucket.dispatched += 1;
+    if (RETURN_STATUSES.includes(o.status)) {
+      bucket.returned += 1;
+      const reason = o.return_reason || 'Not Tagged';
+      bucket.byReason[reason] = (bucket.byReason[reason] || 0) + 1;
+    }
+  }
+  return tree;
+}
+
+// Flattens buildReturnAnalytics()'s nested tree into SKU-level rows — the
+// literal [Platform] -> [Category] -> [SKU] -> [Return Reason: count]
+// shape, ready for a table or export. Sorted with the highest return rate
+// first so the SKUs that most need attention show up on top; never throws
+// on a SKU with zero returns (returnRate simply reads as 0).
+export function flattenReturnAnalytics(orders, products) {
+  const tree = buildReturnAnalytics(orders, products);
+  const reasonCols = [...RETURN_REASONS, 'Not Tagged'];
+  const rows = [];
+  for (const channel of Object.keys(tree)) {
+    for (const category of Object.keys(tree[channel])) {
+      for (const sku of Object.keys(tree[channel][category])) {
+        const b = tree[channel][category][sku];
+        rows.push({
+          channel, category, sku,
+          dispatched: b.dispatched,
+          returned:   b.returned,
+          returnRate: b.dispatched > 0 ? (b.returned / b.dispatched) * 100 : 0,
+          byReason:   reasonCols.reduce((acc, r) => { acc[r] = b.byReason[r] || 0; return acc; }, {}),
+        });
+      }
+    }
+  }
+  return rows.sort((a, b) => b.returnRate - a.returnRate);
 }
