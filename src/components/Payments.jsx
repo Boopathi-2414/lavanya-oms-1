@@ -9,6 +9,8 @@ export default function Payments({ db, setDb }) {
   const [fRecon,       setFRecon]       = useState('');
   const [activeTab,    setActiveTab]    = useState('reconcile');
   const [overwrite,    setOverwrite]    = useState(false); // overwrite existing payments
+  const [page, setPage] = useState(1);
+  const PAGE_SIZE = 50;
   const fileInputRef = useRef();
 
   // ── Payment import ───────────────────────────────────────────
@@ -130,12 +132,17 @@ export default function Payments({ db, setDb }) {
   })();
 
   // ── Reconciliation rows ──────────────────────────────────────
+  // Previously this did a `.find()` per order against the *entire*
+  // payments list — O(orders × payments). With thousands of orders and
+  // payments that becomes genuinely slow (this is one of the main causes
+  // of the app feeling sluggish). A Map lookup is O(1) per order instead.
   const q = search.toLowerCase();
+  const paymentByOrderId = new Map((db.payments || []).map((p) => [p.orderId, p]));
   const rows = (db.orders || [])
     .filter((o) => !o.deleted)
     .map((o) => ({
       ...o,
-      pd: (db.payments || []).find((p) => p.orderId === o.orderId),
+      pd: paymentByOrderId.get(o.orderId),
     }))
     .filter((o) => {
       if (q && !`${o.orderId} ${o.customer || ''}`.toLowerCase().includes(q)) return false;
@@ -143,6 +150,12 @@ export default function Payments({ db, setDb }) {
       if (fRecon === 'no'  &&  o.pd) return false;
       return true;
     });
+
+  // Rendering every matching order unbounded gets slow once orders run
+  // into the thousands — slice to a page instead.
+  const totalPages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
+  const safePage   = Math.min(page, totalPages);
+  const pageRows   = rows.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
 
   const fmt = (n) =>
     (n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -179,7 +192,7 @@ export default function Payments({ db, setDb }) {
             <div className="card-title">💰 Import Settlement Excel</div>
             <div className="info-banner">
               Columns: <strong>Order ID</strong> · <strong>Settlement Amount</strong> · <strong>GST %</strong> · Date<br />
-              Sales Entry-ல் இல்லாத Order ID automatically skip ஆகும்.
+              Order IDs not found in Sales Entry will be automatically skipped.
             </div>
             <div
               className="upload-zone"
@@ -260,7 +273,7 @@ export default function Payments({ db, setDb }) {
                         </div>
                       </td>
                     </tr>
-                  ) : rows.map((o) => (
+                  ) : pageRows.map((o) => (
                     <tr key={o.id}>
                       <td className="truncate" title={o.orderId}>{o.orderId}</td>
                       <td>{o.customer}</td>
@@ -297,6 +310,17 @@ export default function Payments({ db, setDb }) {
                 </tbody>
               </table>
             </div>
+
+            {rows.length > PAGE_SIZE && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 10, justifyContent: 'flex-end' }}>
+                <span style={{ fontSize: 12, color: 'var(--muted,#6b7280)' }}>
+                  Showing {(safePage - 1) * PAGE_SIZE + 1}–{Math.min(safePage * PAGE_SIZE, rows.length)} of {rows.length}
+                </span>
+                <button className="btn btn-ghost btn-sm" disabled={safePage <= 1} onClick={() => setPage(safePage - 1)}>← Prev</button>
+                <span style={{ fontSize: 12 }}>Page {safePage} / {totalPages}</span>
+                <button className="btn btn-ghost btn-sm" disabled={safePage >= totalPages} onClick={() => setPage(safePage + 1)}>Next →</button>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -306,12 +330,12 @@ export default function Payments({ db, setDb }) {
         <div className="card">
           <div className="card-title">📅 Monthly Payment Report</div>
           <p style={{ fontSize: 13, color: 'var(--muted)', marginBottom: 14 }}>
-            Settlement → GST deducted → Net Received (மாதம் வாரியாக)
+            Settlement → GST deducted → Net Received (month-wise)
           </p>
           {monthlySummary.length === 0 ? (
             <div className="empty">
               <div className="big">📅</div>
-              Payment data இல்லை. Reconciliation tab-ல் import பண்ணுங்கள்.
+              No payment data. Import in the Reconciliation tab.
             </div>
           ) : (
             <div className="table-wrap">
