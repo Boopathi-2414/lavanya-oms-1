@@ -3,9 +3,9 @@ import { toast } from './Toast.jsx';
 import { COMPANIES } from '../db.js';
 
 // ── LOUD Error Beep ────────────────────────────────────────────────────────
-// எந்த error வந்தாலும் (not found / already scanned / returned) இதே sound.
+// Same sound for any error (not found / already scanned / returned).
 // DynamicsCompressor + 3 oscillators → browser-maximum volume.
-// கூடுதலாக screen flash செய்கிறோம் — மொபைலில் திரை பார்க்காமல் தெரியும்.
+// Also flashes the screen — noticeable even without looking at a mobile screen.
 function playErrorBeep() {
   try {
     const ctx = new (window.AudioContext || window.webkitAudioContext)();
@@ -58,6 +58,8 @@ export default function Dispatch({ db, setDb }) {
   const [fCompany,     setFCompany]     = useState('');
   const [cameraOpen,   setCameraOpen]   = useState(false);
   const [cameraError,  setCameraError]  = useState('');
+  const [dispatchPage, setDispatchPage] = useState(1);
+  const DISPATCH_PAGE_SIZE = 50;
   const inputRef    = useRef();
   const videoRef    = useRef();
   const streamRef   = useRef(null);
@@ -235,6 +237,11 @@ export default function Dispatch({ db, setDb }) {
     name,
     count: db.orders.filter((o) => o.status === 'Dispatched' && !o.deleted && (o.company || 'Unknown') === name).length,
   }));
+  // Rendering every dispatched order unbounded gets slow as this list
+  // grows — slice to a page instead.
+  const dispatchTotalPages = Math.max(1, Math.ceil(dispatched.length / DISPATCH_PAGE_SIZE));
+  const dispatchSafePage   = Math.min(dispatchPage, dispatchTotalPages);
+  const dispatchPageRows   = dispatched.slice((dispatchSafePage - 1) * DISPATCH_PAGE_SIZE, dispatchSafePage * DISPATCH_PAGE_SIZE);
 
   return (
     <div>
@@ -253,7 +260,7 @@ export default function Dispatch({ db, setDb }) {
             marginTop: 24, padding: '12px 32px', background: '#ef4444', color: '#fff',
             border: 'none', borderRadius: 8, fontSize: 16, fontWeight: 700, cursor: 'pointer',
           }}>❌ Cancel</button>
-          <p style={{ color: '#fff', marginTop: 12, fontSize: 13 }}>Barcode-ஐ frame-க்கு நேராக காட்டுங்கள்</p>
+          <p style={{ color: '#fff', marginTop: 12, fontSize: 13 }}>Hold the barcode straight in front of the frame</p>
         </div>
       )}
 
@@ -315,9 +322,9 @@ export default function Dispatch({ db, setDb }) {
         </div>
 
         <div className="info-banner" style={{ marginBottom: 8, background: '#f0fdf4', borderColor: '#86efac' }}>
-          <strong>📦 இன்றைய Courier Count ({today}):</strong>{' '}
+          <strong>📦 Today's Courier Count ({today}):</strong>{' '}
           {Object.keys(todayCourierMap).length === 0
-            ? <span style={{ color: 'var(--muted)' }}>இன்று எந்த dispatch-உம் இல்லை</span>
+            ? <span style={{ color: 'var(--muted)' }}>No dispatches yet today</span>
             : Object.entries(todayCourierMap).map(([courier, count], i) => (
               <span key={courier}>
                 {i > 0 && ' | '}
@@ -326,7 +333,7 @@ export default function Dispatch({ db, setDb }) {
             ))
           }
           {todayOrders.length > 0 && (
-            <span style={{ marginLeft: 12, color: 'var(--muted)' }}>(மொத்தம்: {todayOrders.length})</span>
+            <span style={{ marginLeft: 12, color: 'var(--muted)' }}>(Total: {todayOrders.length})</span>
           )}
         </div>
 
@@ -349,7 +356,7 @@ export default function Dispatch({ db, setDb }) {
               {dispatched.length === 0 ? (
                 <tr><td colSpan={9}><div className="empty">No dispatched orders yet.</div></td></tr>
               ) : (
-                dispatched.map((o) => (
+                dispatchPageRows.map((o) => (
                   <tr key={o.id}>
                     <td className="truncate" title={o.orderId}>{o.orderId}</td>
                     <td>{o.customer}</td>
@@ -366,6 +373,17 @@ export default function Dispatch({ db, setDb }) {
             </tbody>
           </table>
         </div>
+
+        {dispatched.length > DISPATCH_PAGE_SIZE && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 10, justifyContent: 'flex-end' }}>
+            <span style={{ fontSize: 12, color: 'var(--muted,#6b7280)' }}>
+              Showing {(dispatchSafePage - 1) * DISPATCH_PAGE_SIZE + 1}–{Math.min(dispatchSafePage * DISPATCH_PAGE_SIZE, dispatched.length)} of {dispatched.length}
+            </span>
+            <button className="btn btn-ghost btn-sm" disabled={dispatchSafePage <= 1} onClick={() => setDispatchPage(dispatchSafePage - 1)}>← Prev</button>
+            <span style={{ fontSize: 12 }}>Page {dispatchSafePage} / {dispatchTotalPages}</span>
+            <button className="btn btn-ghost btn-sm" disabled={dispatchSafePage >= dispatchTotalPages} onClick={() => setDispatchPage(dispatchSafePage + 1)}>Next →</button>
+          </div>
+        )}
       </div>
     </div>
   );
