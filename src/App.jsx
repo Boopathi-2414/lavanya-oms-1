@@ -86,7 +86,7 @@ export default function App() {
   // brief loading screen below rather than flashing stale numbers first.
   useEffect(() => {
     if (!user) return;
-    // Register global sync — saveDB() இதை call பண்ணும், data உடனே Supabase-க்கு போகும்
+    // Register global sync — saveDB() calls this, so data goes to Supabase immediately
     window.__supabaseSyncFn = (nextDb) => {
       syncDBToSupabase(nextDb, snapshotRef.current).then((result) => {
         if (result.snapshot) snapshotRef.current = result.snapshot;
@@ -143,7 +143,7 @@ export default function App() {
       syncDBToSupabase(next, snapshotRef.current).then((result) => {
         if (result.snapshot) snapshotRef.current = result.snapshot;
         if (!result.ok) {
-          toast('சில changes Supabase-க்கு போகலை — அடுத்த save-ல் auto sync ஆகும்.', 'info');
+          toast('Some changes did not sync to Supabase — will auto-sync on the next save.', 'info');
         }
       });
     }
