@@ -21,9 +21,9 @@ export function loadDB() {
 }
 
 export function saveDB(db) {
-  // 1) LocalStorage — offline fallback மட்டும்
+  // 1) LocalStorage — offline fallback only
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(db)); } catch (_) {}
-  // 2) Supabase-க்கு நேரடியாக sync
+  // 2) Sync directly to Supabase
   if (typeof window !== 'undefined' && window.__supabaseSyncFn) {
     window.__supabaseSyncFn(db);
   }
@@ -1613,20 +1613,10 @@ export function flattenCourierBreakdown(orders) {
   return rows.sort((a, b) => b.total - a.total);
 }
 
-// ── Return Analytics: Platform → Category → SKU → Return Reason ──────────
+// ── Return Analytics: Platform → SKU → Return Reason ──────────────────────
 // Same idea as buildCourierBreakdown/flattenCourierBreakdown above, just
-// grouped by category/SKU instead of courier, so high-return SKUs surface
-// for inventory and listing decisions.
-
-// Category comes from the Purchase Rate DB (Products) if the SKU has been
-// tagged there. SKUs with no matching product, or a product with no
-// category set, fall under "Uncategorized" rather than being dropped.
-export function getSkuCategory(sku, products) {
-  const s = (sku || '').trim().toLowerCase();
-  if (!s) return 'Uncategorized';
-  const p = (products || []).find((x) => (x.sku || '').trim().toLowerCase() === s);
-  return (p && p.category && p.category.trim()) || 'Uncategorized';
-}
+// grouped by SKU instead of courier, so high-return SKUs surface for
+// inventory and listing decisions.
 
 // "Dispatched" = the order has ever been handed to a courier, i.e. its
 // current status is Dispatched or further down the pipeline. "Ready to
@@ -1635,18 +1625,16 @@ export function getSkuCategory(sku, products) {
 const DISPATCHED_OR_BEYOND = ['Dispatched', 'In Transit (Return)', 'Return Received'];
 const RETURN_STATUSES      = ['In Transit (Return)', 'Return Received'];
 
-export function buildReturnAnalytics(orders, products) {
+export function buildReturnAnalytics(orders) {
   const active = (orders || []).filter((o) => !o.deleted);
-  const tree = {}; // { [channel]: { [category]: { [sku]: { dispatched, returned, byReason } } } }
+  const tree = {}; // { [channel]: { [sku]: { dispatched, returned, byReason } } }
   for (const o of active) {
     if (!DISPATCHED_OR_BEYOND.includes(o.status)) continue;
-    const channel  = o.channel || 'Unknown';
-    const category = getSkuCategory(o.sku, products);
-    const sku      = o.sku || 'Unknown SKU';
+    const channel = o.channel || 'Unknown';
+    const sku     = o.sku || 'Unknown SKU';
     if (!tree[channel]) tree[channel] = {};
-    if (!tree[channel][category]) tree[channel][category] = {};
-    if (!tree[channel][category][sku]) tree[channel][category][sku] = { dispatched: 0, returned: 0, byReason: {} };
-    const bucket = tree[channel][category][sku];
+    if (!tree[channel][sku]) tree[channel][sku] = { dispatched: 0, returned: 0, byReason: {} };
+    const bucket = tree[channel][sku];
     bucket.dispatched += 1;
     if (RETURN_STATUSES.includes(o.status)) {
       bucket.returned += 1;
@@ -1658,26 +1646,24 @@ export function buildReturnAnalytics(orders, products) {
 }
 
 // Flattens buildReturnAnalytics()'s nested tree into SKU-level rows — the
-// literal [Platform] -> [Category] -> [SKU] -> [Return Reason: count]
-// shape, ready for a table or export. Sorted with the highest return rate
-// first so the SKUs that most need attention show up on top; never throws
-// on a SKU with zero returns (returnRate simply reads as 0).
-export function flattenReturnAnalytics(orders, products) {
-  const tree = buildReturnAnalytics(orders, products);
+// literal [Platform] -> [SKU] -> [Return Reason: count] shape, ready for a
+// table, chart, or export. Sorted with the highest return rate first so
+// the SKUs that most need attention show up on top; never throws on a SKU
+// with zero returns (returnRate simply reads as 0).
+export function flattenReturnAnalytics(orders) {
+  const tree = buildReturnAnalytics(orders);
   const reasonCols = [...RETURN_REASONS, 'Not Tagged'];
   const rows = [];
   for (const channel of Object.keys(tree)) {
-    for (const category of Object.keys(tree[channel])) {
-      for (const sku of Object.keys(tree[channel][category])) {
-        const b = tree[channel][category][sku];
-        rows.push({
-          channel, category, sku,
-          dispatched: b.dispatched,
-          returned:   b.returned,
-          returnRate: b.dispatched > 0 ? (b.returned / b.dispatched) * 100 : 0,
-          byReason:   reasonCols.reduce((acc, r) => { acc[r] = b.byReason[r] || 0; return acc; }, {}),
-        });
-      }
+    for (const sku of Object.keys(tree[channel])) {
+      const b = tree[channel][sku];
+      rows.push({
+        channel, sku,
+        dispatched: b.dispatched,
+        returned:   b.returned,
+        returnRate: b.dispatched > 0 ? (b.returned / b.dispatched) * 100 : 0,
+        byReason:   reasonCols.reduce((acc, r) => { acc[r] = b.byReason[r] || 0; return acc; }, {}),
+      });
     }
   }
   return rows.sort((a, b) => b.returnRate - a.returnRate);
