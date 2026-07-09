@@ -78,7 +78,7 @@ export default function Payments({ db, setDb }) {
           db.payments.push({
             id: genId(), orderId,
             settlement, gstPct, gstAmount, netAmount,
-            date:       String(row['Date'] || row['Settlement Date'] || '').trim(),
+            date:       safeDate(row['Date'] || row['Settlement Date'] || ''),
             status:     'Received',
             reconciled: true,
           });
@@ -112,7 +112,7 @@ export default function Payments({ db, setDb }) {
         return d.toISOString().slice(0, 10);
       } catch (_) { return ''; }
     }
-    return String(val);
+    return String(val).trim();
   }
 
   // ── Derived: monthly summary ─────────────────────────────────
