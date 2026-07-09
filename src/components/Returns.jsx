@@ -1,14 +1,18 @@
 import { useRef, useState } from 'react';
 import * as XLSX from 'xlsx';
-import { downloadTemplate, normalizeReturnType, returnTypeClass, returnTypeLabel, RETURN_TYPES } from '../db.js';
+import { downloadTemplate, normalizeReturnType, returnTypeClass, returnTypeLabel, RETURN_TYPES, RETURN_REASONS, normalizeReturnReason } from '../db.js';
 import { toast } from './Toast.jsx';
 
 export default function Returns({ db, setDb }) {
   const [importStatus, setImportStatus] = useState('');
   // Per-row pending type before "Mark Received" — keyed by order id
   const [pendingType, setPendingType] = useState({});
+  // Per-row pending Return Reason before "Mark Received" — keyed by order id.
+  // Mandatory: markReceived() refuses to proceed without one (see below).
+  const [pendingReason, setPendingReason] = useState({});
   // ── Filter state ─────────────────────────────────────────────
   const [filterType,    setFilterType]    = useState('');   // '' | 'Customer Return' | 'RTO' | 'unknown'
+  const [filterReason,  setFilterReason]  = useState('');   // '' | one of RETURN_REASONS | 'unknown'
   const [filterChannel, setFilterChannel] = useState('');   // '' | 'Amazon' | 'Flipkart' | 'Meesho'
   const [filterSearch,  setFilterSearch]  = useState('');   // free-text search
   const [deleteConfirm, setDeleteConfirm] = useState(null); // order id pending delete confirm
@@ -57,6 +61,7 @@ export default function Returns({ db, setDb }) {
           const TYPE_COL     = col('Type of Return');
           const STATUS_COL   = col('Status');
           const COURIER_COL  = col('Courier Partner');
+          const REASON_COL   = col('Return Reason');
 
           dataRows.forEach((row) => {
             const suborderId = String(row[SUBORDER_COL] || '').trim();
@@ -64,6 +69,7 @@ export default function Returns({ db, setDb }) {
             const returnType = String(row[TYPE_COL]  || '').trim();
             const status     = String(row[STATUS_COL] || '').trim();
             const courier    = String(row[COURIER_COL] || '').trim();
+            const rawReason  = REASON_COL !== -1 ? String(row[REASON_COL] || '').trim() : '';
 
             if (!suborderId) return;
 
@@ -91,6 +97,9 @@ export default function Returns({ db, setDb }) {
                 : normalizeReturnType(returnType);
             if (normalised) order.return_type = normalised;
 
+            const normalisedReason = rawReason ? normalizeReturnReason(rawReason) : '';
+            if (normalisedReason) order.return_reason = normalisedReason;
+
             if (courier) order.returnCourier = courier;
             order.returnStatus = status;
             order.status       = 'In Transit (Return)';
@@ -103,9 +112,10 @@ export default function Returns({ db, setDb }) {
           const data = XLSX.utils.sheet_to_json(firstSheet, { defval: '' });
 
           data.forEach((row) => {
-            const oid     = String(row['Order ID'] || row['order_id'] || row['OrderID'] || '').trim();
-            const awb     = fixAwb(row['AWB'] || row['Tracking'] || row['AWB Number'] || '');
-            const rawType = String(row['Return Type'] || row['ReturnType'] || row['Type'] || '').trim();
+            const oid       = String(row['Order ID'] || row['order_id'] || row['OrderID'] || '').trim();
+            const awb       = fixAwb(row['AWB'] || row['Tracking'] || row['AWB Number'] || '');
+            const rawType   = String(row['Return Type'] || row['ReturnType'] || row['Type'] || '').trim();
+            const rawReason = String(row['Return Reason'] || row['ReturnReason'] || row['Reason'] || '').trim();
 
             const order = db.orders.find(
               (o) => !o.deleted && ((oid && o.orderId === oid) || (awb && (o.awb === awb || o.invoice === awb)))
@@ -115,6 +125,7 @@ export default function Returns({ db, setDb }) {
             order.transitDate = new Date().toISOString();
             const normalised  = normalizeReturnType(rawType);
             if (normalised) order.return_type = normalised;
+            if (rawReason) order.return_reason = normalizeReturnReason(rawReason);
             updated++;
           });
         }
@@ -130,22 +141,32 @@ export default function Returns({ db, setDb }) {
     if (fileInputRef.current) fileInputRef.current.value = '';
   }
 
-  // ── Mark received with type confirmation ────────────────────
+  // ── Mark received with type + reason confirmation ────────────
   function markReceived(id) {
     const o = db.orders.find((x) => x.id === id);
     if (!o) return;
-    // Use the inline dropdown selection if set; fall back to existing return_type
-    const chosen = pendingType[id] || o.return_type || '';
+    // Use the inline dropdown selection if set; fall back to existing value
+    const chosenType   = pendingType[id]   || o.return_type   || '';
+    const chosenReason = pendingReason[id] || o.return_reason || '';
+    // Return Reason is mandatory before a return can be finalised — this is
+    // what feeds SKU/category return-rate analytics, so an untagged return
+    // is effectively invisible there.
+    if (!chosenReason) {
+      toast('Select a Return Reason before marking this order Received', 'error');
+      return;
+    }
     o.status       = 'Return Received';
     o.receivedDate = new Date().toISOString();
-    if (chosen) o.return_type = chosen;
+    if (chosenType)   o.return_type   = chosenType;
+    o.return_reason = chosenReason;
     setDb({ ...db });
-    // Clear the pending selection for this row
+    // Clear the pending selections for this row
     setPendingType((prev) => { const n = { ...prev }; delete n[id]; return n; });
+    setPendingReason((prev) => { const n = { ...prev }; delete n[id]; return n; });
     toast(
-      chosen
-        ? `Return Received — ${returnTypeLabel(chosen)}`
-        : 'Return Received (type not set)',
+      chosenType
+        ? `Return Received — ${returnTypeLabel(chosenType)} · ${chosenReason}`
+        : `Return Received — ${chosenReason}`,
       'success'
     );
   }
@@ -154,8 +175,9 @@ export default function Returns({ db, setDb }) {
   function deleteReturn(id) {
     const o = db.orders.find((x) => x.id === id);
     if (!o) return;
-    o.status      = o.dispatchedAt ? 'Dispatched' : 'Ready to Ship';
-    o.return_type = '';
+    o.status        = o.dispatchedAt ? 'Dispatched' : 'Ready to Ship';
+    o.return_type   = '';
+    o.return_reason = '';
     delete o.transitDate;
     delete o.receivedDate;
     setDb({ ...db });
@@ -169,6 +191,13 @@ export default function Returns({ db, setDb }) {
     const o = db.orders.find((x) => x.id === id);
     if (o) { o.return_type = val; setDb({ ...db }); }
     setPendingType((prev) => ({ ...prev, [id]: val }));
+  }
+
+  // Inline reason change without saving yet (mandatory before Mark Received)
+  function setReason(id, val) {
+    const o = db.orders.find((x) => x.id === id);
+    if (o) { o.return_reason = val; setDb({ ...db }); }
+    setPendingReason((prev) => ({ ...prev, [id]: val }));
   }
 
   // ── Also show "Return Received" tab ─────────────────────────
@@ -189,6 +218,8 @@ export default function Returns({ db, setDb }) {
       if (filterChannel && o.channel !== filterChannel) return false;
       if (filterType === 'unknown' && o.return_type) return false;
       if (filterType && filterType !== 'unknown' && o.return_type !== filterType) return false;
+      if (filterReason === 'unknown' && o.return_reason) return false;
+      if (filterReason && filterReason !== 'unknown' && o.return_reason !== filterReason) return false;
       if (q && !`${o.orderId} ${o.customer} ${o.awb || ''} ${o.sku || ''}`.toLowerCase().includes(q)) return false;
       return true;
     });
@@ -198,6 +229,7 @@ export default function Returns({ db, setDb }) {
 
   function clearFilters() {
     setFilterType('');
+    setFilterReason('');
     setFilterChannel('');
     setFilterSearch('');
   }
@@ -234,8 +266,10 @@ export default function Returns({ db, setDb }) {
         <div className="card-title">📤 Import Return Transit Excel</div>
         <div className="info-banner">
           Add a <strong>"Return Type"</strong> column to your Excel with values
-          <strong> Customer Return</strong> or <strong>RTO</strong> and they will be
-          auto-tagged on import. You can also set or change the type inline in the table below.
+          <strong> Customer Return</strong> or <strong>RTO</strong>, and optionally a
+          <strong> "Return Reason"</strong> column ({RETURN_REASONS.join(' / ')}) — both will be
+          auto-tagged on import. You can also set or change either inline in the table below.
+          <strong> Return Reason is mandatory</strong> before an order can be marked Received.
         </div>
         <div
           className="upload-zone"
@@ -243,7 +277,7 @@ export default function Returns({ db, setDb }) {
         >
           <div className="ico-big">📊</div>
           <p><strong>Click to upload</strong> Excel / CSV file</p>
-          <p>Columns: Order ID, AWB, Status, Return Type</p>
+          <p>Columns: Order ID, AWB, Status, Return Type, Return Reason</p>
           <input
             ref={fileInputRef}
             type="file"
@@ -361,6 +395,16 @@ export default function Returns({ db, setDb }) {
             </div>
           )}
 
+          {/* Return Reason filter */}
+          <div className="fg">
+            <label>Return Reason</label>
+            <select value={filterReason} onChange={(e) => setFilterReason(e.target.value)}>
+              <option value="">All Reasons</option>
+              {RETURN_REASONS.map((r) => <option key={r} value={r}>{r}</option>)}
+              <option value="unknown">— Not Tagged</option>
+            </select>
+          </div>
+
           {/* Channel filter */}
           <div className="fg">
             <label>Channel</label>
@@ -380,7 +424,7 @@ export default function Returns({ db, setDb }) {
         </div>
 
         {/* ── Active filter chips ──────────────────────────── */}
-        {(filterType || filterChannel || filterSearch) && (
+        {(filterType || filterReason || filterChannel || filterSearch) && (
           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10 }}>
             <span style={{ fontSize: 12, color: 'var(--muted,#6b7280)', alignSelf: 'center' }}>Filtering:</span>
             {filterSearch && (
@@ -391,6 +435,11 @@ export default function Returns({ db, setDb }) {
             {filterType && (
               <span style={{ background: '#dbeafe', color: '#1d4ed8', borderRadius: 999, padding: '2px 10px', fontSize: 12, fontWeight: 600 }}>
                 {filterType === 'unknown' ? '— Unknown' : filterType} <span style={{ cursor: 'pointer' }} onClick={() => setFilterType('')}>×</span>
+              </span>
+            )}
+            {filterReason && (
+              <span style={{ background: '#fce7f3', color: '#9d174d', borderRadius: 999, padding: '2px 10px', fontSize: 12, fontWeight: 600 }}>
+                {filterReason === 'unknown' ? '— Not Tagged' : filterReason} <span style={{ cursor: 'pointer' }} onClick={() => setFilterReason('')}>×</span>
               </span>
             )}
             {filterChannel && (
@@ -416,6 +465,7 @@ export default function Returns({ db, setDb }) {
                 <th>Return AWB</th>
                 <th>SKU</th>
                 <th>Return Type</th>
+                <th>Return Reason</th>
                 <th>{activeTab === 'transit' ? 'Transit Date' : 'Received Date'}</th>
                 {activeTab === 'transit' && <th>Actions</th>}
               </tr>
@@ -423,7 +473,7 @@ export default function Returns({ db, setDb }) {
             <tbody>
               {displayList.length === 0 ? (
                 <tr>
-                  <td colSpan={activeTab === 'transit' ? 9 : 8}>
+                  <td colSpan={activeTab === 'transit' ? 10 : 9}>
                     <div className="empty">
                       {allTransit.length === 0 && activeTab === 'transit'
                         ? 'No return transit orders. Import an Excel or mark orders from Sales.'
@@ -473,6 +523,28 @@ export default function Returns({ db, setDb }) {
                       )}
                     </td>
 
+                    {/* ── Return Reason cell — mandatory before Mark Received (transit only) ── */}
+                    <td>
+                      {activeTab === 'transit' ? (
+                        <select
+                          className="rt-select"
+                          value={o.return_reason || ''}
+                          onChange={(e) => setReason(o.id, e.target.value)}
+                          style={{
+                            fontSize: 12, padding: '2px 6px', borderRadius: 6,
+                            border: o.return_reason ? undefined : '1.5px solid #ef4444',
+                          }}
+                        >
+                          <option value="">— Select reason (required) —</option>
+                          {RETURN_REASONS.map((r) => <option key={r} value={r}>{r}</option>)}
+                        </select>
+                      ) : (
+                        o.return_reason
+                          ? <span style={{ fontSize: 12 }}>{o.return_reason}</span>
+                          : <span style={{ color: 'var(--muted,#9ca3af)', fontSize: 12 }}>—</span>
+                      )}
+                    </td>
+
                     <td>
                       {activeTab === 'transit'
                         ? (o.transitDate  ? new Date(o.transitDate).toLocaleDateString('en-IN')  : '—')
@@ -485,7 +557,7 @@ export default function Returns({ db, setDb }) {
                           <button
                             className="btn btn-ghost btn-xs"
                             onClick={() => markReceived(o.id)}
-                            title={o.return_type ? `Mark Received as ${o.return_type}` : 'Set Return Type first (optional)'}
+                            title={o.return_reason ? `Mark Received — ${o.return_reason}` : 'Select a Return Reason first (required)'}
                           >
                             ✅ Mark Received
                           </button>
