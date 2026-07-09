@@ -17,6 +17,7 @@ import Products       from './components/Products.jsx';
 import Reports        from './components/Reports.jsx';
 import Trash          from './components/Trash.jsx';
 import FraudAnalysis    from './components/FraudAnalysis.jsx';
+import ReturnAnalytics  from './components/ReturnAnalytics.jsx';
 import PickupDashboard  from './components/PickupDashboard.jsx';
 
 const NAV = [
@@ -33,6 +34,7 @@ const NAV = [
   { id: 'products',  label: 'Purchase Rates',   ico: '🏷️' },
   { section: 'Analytics' },
   { id: 'fraud',     label: 'Fraud Analysis',   ico: '🚨', badge: 'fraud' },
+  { id: 'returnAnalytics', label: 'Return Analytics', ico: '📉' },
   { section: 'Reports' },
   { id: 'reports',   label: 'Monthly Report',   ico: '📈' },
   { id: 'trash',     label: 'Trash',            ico: '🗑️' },
@@ -193,7 +195,7 @@ export default function App() {
     dashboard: 'Dashboard', sales: 'Sales Entry', dispatch: 'Scan & Dispatch', pickup: 'Pickup Dashboard',
     returns: 'Return Transit', received: 'Return Received', payments: 'Payment Entry',
     products: 'Purchase Rates', reports: 'Monthly Report', trash: 'Trash',
-    fraud: 'Fraud Analysis / Blocklist',
+    fraud: 'Fraud Analysis / Blocklist', returnAnalytics: 'Return Analytics',
   };
 
   function renderTab() {
@@ -216,6 +218,7 @@ export default function App() {
       case 'reports':   return <Reports      {...props} />;
       case 'trash':     return <Trash        {...props} />;
       case 'fraud':     return <FraudAnalysis {...props} />;
+      case 'returnAnalytics': return <ReturnAnalytics {...props} />;
       default:          return <Dashboard    {...props} />;
     }
   }
